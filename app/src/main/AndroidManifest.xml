@@ -17,11 +17,11 @@
             android:name="com.handmadeapp.editor.dev.DevMenuActivity"
             android:exported="false" />
 
-        <!-- Backward-compat alias for old FQCN -->
+        <!-- Backward-compat alias for old FQCN (fix targetActivity) -->
         <activity-alias
             android:name="com.appforcross.editor.dev.DevMenuActivity"
-            android:exported="false"
-            android:targetActivity="com.handmadeapp.editor.dev.DevMenuActivity" />
+            android:targetActivity="com.handmadeapp.editor.dev.DevMenuActivity"
+            android:exported="false" />
 
         <!-- Import/Preview Activity (Launcher) -->
         <activity

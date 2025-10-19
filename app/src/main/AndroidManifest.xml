@@ -13,6 +13,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.HandMadeApp">
 
+        <!-- Import Activity (интеграционный экран) -->
+        <activity
+            android:name="com.appforcross.editor.ui.import.ImportActivity"
+            android:exported="false" />
+
         <activity
             android:name="com.appforcross.editor.dev.DevMenuActivity"
             android:exported="false" />

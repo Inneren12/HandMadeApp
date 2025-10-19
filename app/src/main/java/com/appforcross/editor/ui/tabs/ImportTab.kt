@@ -22,6 +22,7 @@ import com.appforcross.editor.preset.PresetGateResult
 import com.appforcross.editor.preset.PresetGateOptions
 import com.appforcross.editor.preset.PresetGate
 import com.appforcross.editor.io.Decoder
+import com.appforcross.editor.prescale.PreScaleRunner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,12 +41,16 @@ fun ImportTab() {
     var gate by remember { mutableStateOf<PresetGateResult?>(null) }
     var targetWst by rememberSaveable { mutableStateOf(240f) } // по умолчанию «A3/14ct коридор»
 
+    // Результат PreScale
+    var preOut by remember { mutableStateOf<PreScaleRunner.Output?>(null) }
+
     // Picker
     val openDoc = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
             pickedUri = uri
+            preOut = null
             // Пытаемся персистить READ, если разрешено системой (фолбэк — игнор ошибок)
             try {
                 ctx.contentResolver.takePersistableUriPermission(
@@ -64,7 +69,10 @@ fun ImportTab() {
                 onBusy = { busy = it },
                 onError = { err = it },
                 onAnalyze = { analyze = it },
-                onGate = { gate = it }
+                onGate = {
+                    gate = it
+                    preOut = null
+                }
             )
         }
     }
@@ -108,6 +116,7 @@ fun ImportTab() {
                         // Пересчитать только PresetGate под новый Wst (без повторного Stage‑3)
                         val a = analyze ?: return@OutlinedButton
                         val uri = pickedUri ?: return@OutlinedButton
+                        preOut = null
                         scope.launch {
                             busy = true; err = null
                             try {
@@ -132,13 +141,37 @@ fun ImportTab() {
                 ) { Text("Recalculate Preset") }
 
                 OutlinedButton(
-                    enabled = !busy && gate != null,
+                    enabled = !busy && gate != null && analyze != null && pickedUri != null,
                     onClick = {
-                        Logger.i("UI", "IMPORT.preset.apply", mapOf(
-                            "preset" to gate?.spec?.id,
-                            "r" to gate?.r
-                        ))
-                        // Здесь на 6 спринте будем формировать PreScaleSpec и запускать PreScale
+                        val g = gate ?: return@OutlinedButton
+                        val a = analyze ?: return@OutlinedButton
+                        val uri = pickedUri ?: return@OutlinedButton
+                        scope.launch {
+                            busy = true; err = null
+                            try {
+                                val out = withContext(Dispatchers.Default) {
+                                    PreScaleRunner.run(
+                                        ctx = ctx,
+                                        uri = uri,
+                                        analyze = a,
+                                        gate = g,
+                                        targetWst = targetWst.roundToInt()
+                                    )
+                                }
+                                preOut = out
+                                Logger.i("UI", "IMPORT.preset.apply", mapOf(
+                                    "preset" to g.spec.id, "Wst" to out.wst, "Hst" to out.hst,
+                                    "ssim" to out.fr.ssim, "edgeKeep" to out.fr.edgeKeep,
+                                    "banding" to out.fr.banding, "de95" to out.fr.de95,
+                                    "png" to out.pngPath, "pass" to out.passed
+                                ))
+                            } catch (e: Exception) {
+                                err = "PreScale failed: ${e.message}"
+                                Logger.e("UI", "IMPORT.preset.apply.fail", err = e)
+                            } finally {
+                                busy = false
+                            }
+                        }
                     }
                 ) { Text("Apply Preset") }
             }
@@ -173,6 +206,18 @@ fun ImportTab() {
             Text("r = ${fmt(g.r)}  •  σ_base=${fmt(g.normalized.sigmaBase)}  σ_edge=${fmt(g.normalized.sigmaEdge)}  σ_flat=${fmt(g.normalized.sigmaFlat)}")
             Spacer(Modifier.height(6.dp))
             Text("Covers (preview masks): edge=${pct(g.covers.edgePct)} flat=${pct(g.covers.flatPct)} skin=${pct(g.covers.skinPct)} sky=${pct(g.covers.skyPct)}")
+        }
+
+        // PreScale result
+        preOut?.let { o ->
+            HorizontalDivider()
+            Text("PreScale", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text("Grid: ${o.wst} × ${o.hst}")
+            Text("SSIM: ${fmt(o.fr.ssim)} • EdgeKeep: ${fmt(o.fr.edgeKeep)}")
+            Text("Banding: ${fmt(o.fr.banding)} • ΔE95: ${fmt(o.fr.de95)}")
+            Text("Pass: ${o.passed}")
+            Text("PNG: ${o.pngPath}", style = MaterialTheme.typography.bodySmall)
         }
 
         err?.let {

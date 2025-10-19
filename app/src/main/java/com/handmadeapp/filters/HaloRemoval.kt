@@ -1,4 +1,4 @@
-package com.appforcross.editor.filters
+package com.handmadeapp.filters
 
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -32,7 +32,7 @@ object HaloRemoval {
         for (i in dog.indices) {
             val v = blurSmall[i] - blurLarge[i]
             dog[i] = v
-            haloScore += kotlin.math.abs(v)
+            haloScore += abs(v)
         }
         haloScore /= dog.size
 

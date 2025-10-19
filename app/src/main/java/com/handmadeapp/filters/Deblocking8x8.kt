@@ -1,4 +1,4 @@
-package com.appforcross.editor.filters
+package com.handmadeapp.filters
 
 import android.graphics.Bitmap
 import android.graphics.Color

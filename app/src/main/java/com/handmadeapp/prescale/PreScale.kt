@@ -1,12 +1,12 @@
-package com.appforcross.editor.prescale
+package com.handmadeapp.prescale
 
 import android.graphics.Bitmap
 import android.graphics.Color
 import com.appforcross.editor.analysis.Masks
 import com.appforcross.editor.logging.Logger
-import com.appforcross.editor.preset.PresetGateResult
-import com.appforcross.editor.preset.PresetSpec
-import com.appforcross.editor.preset.ScaleFilter
+import com.handmadeapp.preset.PresetGateResult
+import com.handmadeapp.preset.PresetSpec
+import com.handmadeapp.preset.ScaleFilter
 import kotlin.math.*
 
 object PreScale {

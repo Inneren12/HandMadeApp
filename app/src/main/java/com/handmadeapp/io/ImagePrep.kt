@@ -1,12 +1,13 @@
-package com.appforcross.editor.io
+package com.handmadeapp.io
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
+import android.net.Uri
 import com.appforcross.editor.color.ColorMgmt
 import com.appforcross.editor.color.HdrTonemap
-import com.appforcross.editor.filters.Deblocking8x8
-import com.appforcross.editor.filters.HaloRemoval
+import com.handmadeapp.filters.Deblocking8x8
+import com.handmadeapp.filters.HaloRemoval
 import com.appforcross.editor.logging.Logger
 
 /** Этап 2: загрузка → цвет → HDR → deblocking → halo. Возвращает linear sRGB RGBA_F16. */
@@ -25,7 +26,7 @@ object ImagePrep {
      * Основной входной шаг пайплайна.
      * @param deblockThreshold порог блокинга (средний) для включения сглаживания, по умолчанию 0.008
      */
-    fun prepare(ctx: Context, uri: android.net.Uri, deblockThreshold: Float = 0.008f): PrepResult {
+    fun prepare(ctx: Context, uri: Uri, deblockThreshold: Float = 0.008f): PrepResult {
         // 1) Декод
         val dec = Decoder.decodeUri(ctx, uri)
         // 2) В линейный sRGB (F16)

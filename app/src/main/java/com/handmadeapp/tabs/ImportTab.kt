@@ -1,5 +1,6 @@
-package com.appforcross.editor.ui.tabs
+package com.handmadeapp.tabs
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,11 +19,12 @@ import androidx.compose.ui.unit.dp
 import com.appforcross.editor.analysis.AnalyzeResult
 import com.appforcross.editor.analysis.Stage3Analyze
 import com.appforcross.editor.logging.Logger
-import com.appforcross.editor.preset.PresetGateResult
-import com.appforcross.editor.preset.PresetGateOptions
-import com.appforcross.editor.preset.PresetGate
-import com.appforcross.editor.io.Decoder
-import com.appforcross.editor.prescale.PreScaleRunner
+import com.handmadeapp.preset.PresetGateResult
+import com.handmadeapp.preset.PresetGateOptions
+import com.handmadeapp.preset.PresetGate
+import com.handmadeapp.io.Decoder
+import com.handmadeapp.prescale.PreScaleRunner
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -247,8 +249,8 @@ private fun pct(x: Double): String = "${(x * 100.0).coerceIn(0.0, 100.0).let { S
 private fun fmt(x: Double): String = String.format("%.3f", x)
 
 private fun runAnalyzeAndGate(
-    ctx: android.content.Context,
-    scope: kotlinx.coroutines.CoroutineScope,
+    ctx: Context,
+    scope: CoroutineScope,
     uri: Uri,
     targetWst: Int,
     onBusy: (Boolean) -> Unit,

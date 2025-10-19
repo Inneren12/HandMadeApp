@@ -1,4 +1,4 @@
-package com.appforcross.editor.preset
+package com.handmadeapp.preset
 
 import android.graphics.Bitmap
 import com.appforcross.editor.analysis.AnalyzeResult

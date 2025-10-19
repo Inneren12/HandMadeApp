@@ -1,9 +1,9 @@
-package com.appforcross.editor.analysis
+package com.handmadeapp.analysis
 
 import android.content.Context
 import android.graphics.*
 import android.net.Uri
-import com.appforcross.editor.io.Decoder
+import com.handmadeapp.io.Decoder
 import com.handmadeapp.logging.Logger
 import com.handmadeapp.diagnostics.DiagnosticsManager
 import java.io.File

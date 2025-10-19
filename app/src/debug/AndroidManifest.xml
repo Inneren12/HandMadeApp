@@ -6,7 +6,7 @@
             android:exported="true"
             android:label="Developer Options"
             android:icon="@mipmap/ic_launcher"
-            android:targetActivity="com.appforcross.editor.dev.DevMenuActivity">
+            android:targetActivity="com.handmadeapp.editor.dev.DevMenuActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -1,9 +1,9 @@
-package com.appforcross.editor.preset
+package com.handmadeapp.preset
 
 import android.content.Context
 import android.net.Uri
 import com.appforcross.editor.analysis.Stage3Analyze
-import com.appforcross.editor.io.Decoder
+import com.handmadeapp.io.Decoder
 import com.appforcross.editor.logging.Logger
 import java.io.File
 import java.io.FileOutputStream

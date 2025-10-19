@@ -1,13 +1,13 @@
-package com.appforcross.editor.prescale
+package com.handmadeapp.prescale
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import com.appforcross.editor.analysis.AnalyzeResult
 import com.appforcross.editor.diagnostics.DiagnosticsManager
-import com.appforcross.editor.io.ImagePrep
+import com.handmadeapp.io.ImagePrep
 import com.appforcross.editor.logging.Logger
-import com.appforcross.editor.preset.PresetGateResult
+import com.handmadeapp.preset.PresetGateResult
 import java.io.File
 import java.io.FileOutputStream
 

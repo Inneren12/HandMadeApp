@@ -1,4 +1,4 @@
-package com.appforcross.editor.io
+package com.handmadeapp.io
 
 import android.content.ContentResolver
 import android.content.Context

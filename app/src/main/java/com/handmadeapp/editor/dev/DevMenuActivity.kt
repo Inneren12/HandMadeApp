@@ -13,12 +13,11 @@ import java.io.File
 import java.io.FileOutputStream
 import com.handmadeapp.R
 import com.handmadeapp.diagnostics.DiagnosticsManager
-import com.handmadeapp.editor.dev.DevPrefs
 import com.handmadeapp.logging.LogLevel
 import com.handmadeapp.logging.Logger
-import com.appforcross.editor.io.ImagePrep
+import com.handmadeapp.io.ImagePrep
 import com.appforcross.editor.analysis.Stage3Analyze
-import com.appforcross.editor.preset.Stage4Runner
+import com.handmadeapp.preset.Stage4Runner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob

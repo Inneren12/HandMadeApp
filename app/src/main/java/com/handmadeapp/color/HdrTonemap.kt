@@ -1,4 +1,4 @@
-package com.appforcross.editor.color
+package com.handmadeapp.color
 
 import android.graphics.Bitmap
 import android.graphics.Color

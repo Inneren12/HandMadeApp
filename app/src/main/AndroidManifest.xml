@@ -13,25 +13,20 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.HandMadeApp">
 
-        <!-- Import Activity (интеграционный экран) -->
-        <activity
-            android:name="com.appforcross.editor.ui.import.ImportActivity"
-            android:exported="false" />
-
         <activity
             android:name="com.appforcross.editor.dev.DevMenuActivity"
             android:exported="false" />
 
-        <!-- Если у вас есть лаунчер-активити, раскомментируйте и укажите её класс:
+        <!-- Import/Preview Activity (Launcher) -->
         <activity
-            android:name=".MainActivity"
-            android:exported="true">
+            android:name="com.handmadeapp.ui.importer.ImportActivity"
+            android:exported="true"
+            tools:node="merge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        -->
     </application>
 
 </manifest>

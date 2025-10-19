@@ -4,7 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ColorSpace
 import android.os.Build
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.logging.Logger
 import kotlin.math.*
 
 /** Конверсия в **linear sRGB** (RGBA_F16), далее все фильтры — в линейном RGB. */

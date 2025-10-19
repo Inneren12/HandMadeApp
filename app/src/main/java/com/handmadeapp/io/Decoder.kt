@@ -6,7 +6,7 @@ import android.graphics.*
 import android.net.Uri
 import android.os.Build
 import androidx.exifinterface.media.ExifInterface
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.logging.Logger
 import java.io.InputStream
 
 data class DecodedImage(

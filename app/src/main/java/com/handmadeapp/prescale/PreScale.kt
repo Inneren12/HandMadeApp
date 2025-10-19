@@ -2,8 +2,8 @@ package com.handmadeapp.prescale
 
 import android.graphics.Bitmap
 import android.graphics.Color
-import com.appforcross.editor.analysis.Masks
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.analysis.Masks
+import com.handmadeapp.logging.Logger
 import com.handmadeapp.preset.PresetGateResult
 import com.handmadeapp.preset.PresetSpec
 import com.handmadeapp.preset.ScaleFilter

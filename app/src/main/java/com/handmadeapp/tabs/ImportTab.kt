@@ -16,9 +16,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.appforcross.editor.analysis.AnalyzeResult
-import com.appforcross.editor.analysis.Stage3Analyze
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.analysis.AnalyzeResult
+import com.handmadeapp.analysis.Stage3Analyze
+import com.handmadeapp.logging.Logger
 import com.handmadeapp.preset.PresetGateResult
 import com.handmadeapp.preset.PresetGateOptions
 import com.handmadeapp.preset.PresetGate

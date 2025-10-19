@@ -3,7 +3,7 @@ package com.handmadeapp.color
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ColorSpace
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.logging.Logger
 import kotlin.math.*
 
 /** Простейший EOTF для BT.2100 **PQ** и **HLG** → линейный (норм. до [0..1]). */

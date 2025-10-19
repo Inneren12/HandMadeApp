@@ -4,11 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
 import android.net.Uri
-import com.appforcross.editor.color.ColorMgmt
-import com.appforcross.editor.color.HdrTonemap
+import com.handmadeapp.color.ColorMgmt
+import com.handmadeapp.color.HdrTonemap
 import com.handmadeapp.filters.Deblocking8x8
 import com.handmadeapp.filters.HaloRemoval
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.logging.Logger
 
 /** Этап 2: загрузка → цвет → HDR → deblocking → halo. Возвращает linear sRGB RGBA_F16. */
 object ImagePrep {

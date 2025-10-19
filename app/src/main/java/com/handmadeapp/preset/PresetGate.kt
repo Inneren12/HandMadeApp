@@ -1,10 +1,10 @@
 package com.handmadeapp.preset
 
 import android.graphics.Bitmap
-import com.appforcross.editor.analysis.AnalyzeResult
-import com.appforcross.editor.analysis.Metrics
-import com.appforcross.editor.analysis.Masks
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.analysis.AnalyzeResult
+import com.handmadeapp.analysis.Metrics
+import com.handmadeapp.analysis.Masks
+import com.handmadeapp.logging.Logger
 import kotlin.math.max
 
 /** Тип фильтра ресемплинга для прескейла. */

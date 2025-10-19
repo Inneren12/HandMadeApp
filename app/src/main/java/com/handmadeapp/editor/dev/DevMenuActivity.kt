@@ -16,7 +16,7 @@ import com.handmadeapp.diagnostics.DiagnosticsManager
 import com.handmadeapp.logging.LogLevel
 import com.handmadeapp.logging.Logger
 import com.handmadeapp.io.ImagePrep
-import com.appforcross.editor.analysis.Stage3Analyze
+import com.handmadeapp.analysis.Stage3Analyze
 import com.handmadeapp.preset.Stage4Runner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

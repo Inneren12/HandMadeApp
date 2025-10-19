@@ -2,7 +2,7 @@ package com.handmadeapp.filters
 
 import android.graphics.Bitmap
 import android.graphics.Color
-import com.appforcross.editor.logging.Logger
+import com.handmadeapp.logging.Logger
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max

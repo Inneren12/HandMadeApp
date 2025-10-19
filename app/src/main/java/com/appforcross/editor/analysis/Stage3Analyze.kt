@@ -70,8 +70,8 @@ object Stage3Analyze {
         val edgeMask = buildEdgeMask(sob.mag, preview.width, preview.height)
         val (var7, var3, var9) = localVariance3_7_9(planes.luma, preview.width, preview.height)
         val flatMask = buildFlatMask(var7, preview.width, preview.height)
-        val hiTexFine = thresholdMask(var3, quantile(var3, 0.70), preview.width, preview.height)
-        val hiTexCoarse = thresholdMask(var9, quantile(var9, 0.70), preview.width, preview.height)
+        val hiTexFine = thresholdMask(var3, quantile(var3, 0.70f), preview.width, preview.height)
+        val hiTexCoarse = thresholdMask(var9, quantile(var9, 0.70f), preview.width, preview.height)
         val skinMask = skinMask(preview)
         val skyMask = skyMask(preview, var7)
 

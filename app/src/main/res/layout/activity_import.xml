@@ -17,6 +17,13 @@
             android:layout_height="wrap_content"
             android:text="Выбрать изображение" />
 
+        <Button
+            android:id="@+id/btnProcess"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:text="Сделать паттерн" />
+
         <TextView
             android:id="@+id/tvFileName"
             android:layout_width="0dp"
@@ -50,6 +57,13 @@
             android:layout_gravity="center"
             android:visibility="gone" />
     </FrameLayout>
+
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="8dp"
+        android:text="" />
 
     <!-- Нижняя панель с «живыми» настройками -->
     <LinearLayout

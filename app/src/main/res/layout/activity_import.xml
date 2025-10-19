@@ -24,6 +24,13 @@
             android:layout_marginStart="12dp"
             android:text="Сделать паттерн" />
 
+        <CheckBox
+            android:id="@+id/cbSampling"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:text="Sampling (S7.1)" />
+
         <TextView
             android:id="@+id/tvFileName"
             android:layout_width="0dp"
@@ -48,6 +55,12 @@
             android:layout_height="match_parent"
             android:adjustViewBounds="true"
             android:scaleType="fitCenter" />
+
+        <com.handmadeapp.ui.importer.QuantOverlayView
+            android:id="@+id/quantOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
 
         <ProgressBar
             android:id="@+id/progress"

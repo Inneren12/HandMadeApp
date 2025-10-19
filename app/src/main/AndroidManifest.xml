@@ -12,17 +12,19 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.HandMadeApp">
-
-        <!-- Dev menu -->
+        <!-- DevMenu доступен из приложения, но не лаунчер -->
         <activity
             android:name="com.handmadeapp.editor.dev.DevMenuActivity"
             android:exported="false" />
+        <!-- На всякий случай удаляем устаревший alias -->
+        <activity-alias
+            android:name="com.appforcross.editor.dev.DevMenuActivity"
+            tools:node="remove" />
 
-        <!-- Import/Preview Activity (Launcher) -->
+        <!-- Import/Preview — СТАРТОВАЯ активити -->
         <activity
             android:name="com.handmadeapp.ui.importer.ImportActivity"
-            android:exported="true"
-            tools:node="merge">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -23,7 +23,11 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
+import com.appforcross.editor.analysis.Stage3Analyze
+import com.appforcross.editor.preset.Stage4Runner
+import com.appforcross.editor.prescale.PreScaleRunner
 import com.handmadeapp.R
+import java.io.File
 import kotlin.math.max
 
 /**
@@ -39,8 +43,12 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var sbSaturation: SeekBar
     private lateinit var progress: ProgressBar
     private lateinit var fileNameView: TextView
+    private lateinit var btnProcess: Button
+    private lateinit var tvStatus: TextView
 
     private var baseBitmap: Bitmap? = null
+    private var currentUri: Uri? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_import)
@@ -52,6 +60,8 @@ class ImportActivity : AppCompatActivity() {
         sbSaturation = findViewById(R.id.sbSaturation)
         progress = findViewById(R.id.progress)
         fileNameView = findViewById(R.id.tvFileName)
+        btnProcess = findViewById(R.id.btnProcess)
+        tvStatus = findViewById(R.id.tvStatus)
 
         pickBtn.setOnClickListener {
             openImagePicker()
@@ -76,6 +86,16 @@ class ImportActivity : AppCompatActivity() {
 
         // Если пришёл Intent c data (поделиться/открыть)
         intent?.data?.let { onImageChosen(it) }
+
+        // Кнопка запуска конвейера
+        btnProcess.setOnClickListener {
+            val uri = currentUri
+            if (uri == null) {
+                Toast.makeText(this, "Сначала выберите изображение", Toast.LENGTH_SHORT).show()
+            } else {
+                runPipeline(uri, targetWst = 240)
+            }
+        }
     }
 
     private fun openImagePicker() {
@@ -99,6 +119,8 @@ class ImportActivity : AppCompatActivity() {
         progress.isVisible = true
         image.setImageDrawable(ColorDrawable(0xFF222222.toInt()))
         fileNameView.text = queryDisplayName(uri) ?: "Выбран файл"
+        tvStatus.text = "Загружаем превью…"
+        currentUri = uri
         Thread {
             try {
                 val bmp = decodePreview(uri, maxDim = 2048)
@@ -107,13 +129,65 @@ class ImportActivity : AppCompatActivity() {
                     image.setImageBitmap(bmp)
                     progress.isVisible = false
                     applyAdjustments()
+                    tvStatus.text = "Предпросмотр готов. Можно запускать конвейер."
                     Log.i(TAG, "preview.built w=${bmp.width} h=${bmp.height}")
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "import.decode.fail: ${t.message}", t)
                 runOnUiThread {
                     progress.isVisible = false
+                    tvStatus.text = "Ошибка загрузки: ${t.message}"
                     Toast.makeText(this, "Ошибка загрузки: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    /** Запуск основного конвейера: Stage3 → Stage4 → PreScale. Результат показываем в превью. */
+    private fun runPipeline(uri: Uri, targetWst: Int) {
+        tvStatus.text = "Запуск конвейера…"
+        progress.isVisible = true
+        btnProcess.isEnabled = false
+
+        Thread {
+            try {
+                // 1) Stage3 — анализ превью (маски, метрики, классификация)
+                val analyze = Stage3Analyze.run(this, uri)
+
+                // 2) Stage4 — выбор пресета/параметров
+                val stage4 = Stage4Runner.run(this, uri, targetWst = targetWst)
+
+                // 3) PreScale — полный прогон и PNG-выход
+                val pre = PreScaleRunner.run(
+                    ctx = this,
+                    uri = uri,
+                    analyze = analyze,
+                    gate = stage4.gate,
+                    targetWst = targetWst
+                )
+
+                val png = File(pre.pngPath)
+                val outBmp = BitmapFactory.decodeFile(png.absolutePath)
+
+                runOnUiThread {
+                    if (outBmp != null) {
+                        image.colorFilter = null   // сбросить локальные правки предпросмотра
+                        image.setImageBitmap(outBmp)
+                        tvStatus.text = "Готово: ${png.name} (${outBmp.width}×${outBmp.height})"
+                    } else {
+                        tvStatus.text = "Готово, но не удалось отобразить результат"
+                    }
+                    progress.isVisible = false
+                    btnProcess.isEnabled = true
+                    Toast.makeText(this, "Конвейер завершён", Toast.LENGTH_SHORT).show()
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "pipeline.fail: ${t.message}", t)
+                runOnUiThread {
+                    progress.isVisible = false
+                    btnProcess.isEnabled = true
+                    tvStatus.text = "Ошибка конвейера: ${t.message}"
+                    Toast.makeText(this, "Ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()

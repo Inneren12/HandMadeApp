@@ -19,7 +19,7 @@
             android:exported="true"
             android:label="Import (beta)"
             android:icon="@mipmap/ic_launcher"
-            android:targetActivity="com.appforcross.editor.ui.import.ImportActivity">
+            android:targetActivity="com.handmadeapp.ui.importer.ImportActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

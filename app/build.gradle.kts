@@ -1,4 +1,5 @@
 // Hash c961ad5792f71bc7811ca93b6d1306b8
+// HandMadeApp: add EXIF dependency for import/preview rotation
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -74,7 +75,7 @@ dependencies {
     // Dev prefs (флаги логирования/дампов)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
-    // EXIF для поворота и метаданных
+    // EXIF поддержка (корректный поворот фото для предпросмотра)
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
 }

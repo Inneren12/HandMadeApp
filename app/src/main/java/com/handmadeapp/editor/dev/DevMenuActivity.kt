@@ -17,6 +17,7 @@ import com.handmadeapp.editor.dev.DevPrefs
 import com.handmadeapp.logging.LogLevel
 import com.handmadeapp.logging.Logger
 import com.appforcross.editor.io.ImagePrep
+import com.appforcross.editor.analysis.Stage3Analyze
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,6 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val REQ_PICK_IMAGE = 1001
+private const val REQ_PICK_ANALYZE = 1002
 
 class DevMenuActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -37,6 +39,7 @@ class DevMenuActivity : Activity() {
         val swDebug = findViewById<Switch>(R.id.swDebugLogs)
         val btnExport = findViewById<Button>(R.id.btnExportDiag)
         val btnStage2 = findViewById<Button>(R.id.btnPickRunStage2)
+        val btnStage3 = findViewById<Button>(R.id.btnPickAnalyzeStage3)
 
         scope.launch {
             swDebug.isChecked = DevPrefs.isDebug(this@DevMenuActivity).first()
@@ -75,6 +78,15 @@ class DevMenuActivity : Activity() {
             }
             startActivityForResult(intent, REQ_PICK_IMAGE)
         }
+
+        btnStage3.setOnClickListener {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivityForResult(intent, REQ_PICK_ANALYZE)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -88,6 +100,18 @@ class DevMenuActivity : Activity() {
                 // Ignore — best effort only.
             }
             runStage2(uri)
+        }
+
+        if (requestCode == REQ_PICK_ANALYZE && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            val rawFlags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            val flags = if (rawFlags != 0) rawFlags else Intent.FLAG_GRANT_READ_URI_PERMISSION
+            try {
+                contentResolver.takePersistableUriPermission(uri, flags)
+            } catch (_: Exception) {
+                // Ignore — best effort only.
+            }
+            runStage3(uri)
         }
     }
 
@@ -120,6 +144,46 @@ class DevMenuActivity : Activity() {
             } catch (e: Exception) {
                 Logger.e("IO", "prep.fail", err = e, data = mapOf("uri" to uri.toString()))
                 Toast.makeText(this@DevMenuActivity, "Stage-2 error: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun runStage3(uri: Uri) {
+        scope.launch {
+            try {
+                val res = withContext(Dispatchers.Default) {
+                    Stage3Analyze.run(this@DevMenuActivity, uri)
+                }
+                val out = File(cacheDir, "stage3_preview.png")
+                withContext(Dispatchers.IO) {
+                    FileOutputStream(out).use { fos ->
+                        res.preview.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                    }
+                }
+                Logger.i(
+                    "ANALYZE",
+                    "stage3.result",
+                    mapOf(
+                        "uri" to uri.toString(),
+                        "kind" to res.decision.kind.name,
+                        "subtype" to (res.decision.subtype ?: "-"),
+                        "confidence" to "%.2f".format(res.decision.confidence),
+                        "preview" to out.absolutePath
+                    )
+                )
+                Toast.makeText(
+                    this@DevMenuActivity,
+                    "Stage-3: ${res.decision.kind} (${res.decision.subtype ?: "-"})",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                Logger.e(
+                    "ANALYZE",
+                    "stage3.fail",
+                    data = mapOf("uri" to uri.toString()),
+                    err = e
+                )
+                Toast.makeText(this@DevMenuActivity, "Stage-3 error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }

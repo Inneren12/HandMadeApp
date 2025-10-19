@@ -14,7 +14,9 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Log
+import android.util.Size
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.SeekBar
@@ -23,11 +25,20 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
-import com.appforcross.editor.analysis.Stage3Analyze
-import com.appforcross.editor.preset.Stage4Runner
-import com.appforcross.editor.prescale.PreScaleRunner
+import com.appforcross.editor.config.FeatureFlags
+import com.appforcross.editor.palette.S7Sampler
+import com.appforcross.editor.palette.S7SamplingIo
+import com.appforcross.editor.palette.S7SamplingResult
+import com.appforcross.editor.palette.S7SamplingSpec
 import com.handmadeapp.R
+import com.handmadeapp.analysis.Masks
+import com.handmadeapp.analysis.Stage3Analyze
+import com.handmadeapp.diagnostics.DiagnosticsManager
+import com.handmadeapp.logging.Logger
+import com.handmadeapp.preset.Stage4Runner
+import com.handmadeapp.prescale.PreScaleRunner
 import java.io.File
+import java.util.Locale
 import kotlin.math.max
 
 /**
@@ -45,9 +56,18 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var fileNameView: TextView
     private lateinit var btnProcess: Button
     private lateinit var tvStatus: TextView
+    private lateinit var cbSampling: CheckBox
+    private lateinit var overlay: QuantOverlayView
 
     private var baseBitmap: Bitmap? = null
     private var currentUri: Uri? = null
+    private var lastSampling: S7SamplingResult? = null
+    private var overlayImageSize: Size? = null
+    private var cachedMasks: Masks? = null
+    private var cachedMasksSize: Size? = null
+    private var samplingRunning = false
+    private var overlayPending = false
+    private var suppressSamplingToggle = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +82,35 @@ class ImportActivity : AppCompatActivity() {
         fileNameView = findViewById(R.id.tvFileName)
         btnProcess = findViewById(R.id.btnProcess)
         tvStatus = findViewById(R.id.tvStatus)
+        cbSampling = findViewById(R.id.cbSampling)
+        overlay = findViewById(R.id.quantOverlay)
+
+        FeatureFlags.logFlagsOnce()
+        cbSampling.isEnabled = false
+        cbSampling.isChecked = false
+        overlay.isVisible = false
+        cbSampling.isVisible = FeatureFlags.S7_SAMPLING || FeatureFlags.S7_OVERLAY
+
+        cbSampling.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressSamplingToggle) return@setOnCheckedChangeListener
+            if (!FeatureFlags.S7_OVERLAY && !FeatureFlags.S7_SAMPLING) {
+                return@setOnCheckedChangeListener
+            }
+            if (isChecked) {
+                val result = lastSampling
+                if (result == null) {
+                    overlayPending = true
+                    startSamplingInBackground(showOverlayWhenDone = true)
+                } else {
+                    showOverlay(result)
+                }
+            } else {
+                overlay.isVisible = false
+                overlayImageSize?.let {
+                    overlay.setData(it, null, heat = false, points = false)
+                }
+            }
+        }
 
         pickBtn.setOnClickListener {
             openImagePicker()
@@ -121,12 +170,17 @@ class ImportActivity : AppCompatActivity() {
         fileNameView.text = queryDisplayName(uri) ?: "Выбран файл"
         tvStatus.text = "Загружаем превью…"
         currentUri = uri
+        resetSamplingState()
+        cbSampling.isEnabled = false
         Thread {
             try {
                 val bmp = decodePreview(uri, maxDim = 2048)
                 runOnUiThread {
                     baseBitmap = bmp
                     image.setImageBitmap(bmp)
+                    overlayImageSize = Size(bmp.width, bmp.height)
+                    resetSamplingState()
+                    cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
                     progress.isVisible = false
                     applyAdjustments()
                     tvStatus.text = "Предпросмотр готов. Можно запускать конвейер."
@@ -284,6 +338,137 @@ class ImportActivity : AppCompatActivity() {
                 if (i >= 0 && c.moveToFirst()) c.getString(i) else null
             }
         } catch (_: Throwable) { null }
+    }
+
+    private fun resetSamplingState() {
+        lastSampling = null
+        overlayPending = false
+        samplingRunning = false
+        cachedMasks = null
+        cachedMasksSize = null
+        overlayImageSize = null
+        suppressSamplingToggle = true
+        cbSampling.isChecked = false
+        suppressSamplingToggle = false
+        overlay.isVisible = false
+    }
+
+    private fun startSamplingInBackground(showOverlayWhenDone: Boolean) {
+        if (!FeatureFlags.S7_SAMPLING) return
+        val bmp = baseBitmap
+        val uri = currentUri
+        if (bmp == null || uri == null) {
+            Toast.makeText(this, "Сначала выберите изображение", Toast.LENGTH_SHORT).show()
+            suppressSamplingToggle = true
+            cbSampling.isChecked = false
+            suppressSamplingToggle = false
+            return
+        }
+        if (samplingRunning) {
+            overlayPending = overlayPending || showOverlayWhenDone
+            tvStatus.text = "S7.1: расчёт уже выполняется…"
+            return
+        }
+        overlayPending = showOverlayWhenDone
+        samplingRunning = true
+        cbSampling.isEnabled = false
+        progress.isVisible = true
+        tvStatus.text = "S7.1: считаем выборку…"
+
+        Thread {
+            try {
+                val masks = ensureMasksFor(bmp, uri)
+                val tier = S7SamplingSpec.detectDeviceTier(this).key
+                val seed = S7SamplingSpec.DEFAULT_SEED
+                val sampling = S7Sampler.run(bmp, masks, tier, seed)
+                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                    try {
+                        S7SamplingIo.writeJson(dir, sampling)
+                        S7SamplingIo.writeRoiHistogramPng(dir, sampling, bmp.width, bmp.height)
+                    } catch (io: Throwable) {
+                        Logger.w("PALETTE", "sampling.io.fail", mapOf("error" to (io.message ?: "io")))
+                    }
+                }
+                runOnUiThread {
+                    samplingRunning = false
+                    lastSampling = sampling
+                    overlayImageSize = Size(bmp.width, bmp.height)
+                    val coverageOk = (sampling.params["coverage_ok"] as? Boolean) ?: true
+                    val coverageState = if (coverageOk) "OK" else "низкое"
+                    val hist = formatHistogram(sampling.roiHist)
+                    tvStatus.text = "S7.1: ${sampling.samples.size} семплов • coverage=$coverageState • $hist • готово к S7.2"
+                    progress.isVisible = false
+                    cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
+                    if (overlayPending && FeatureFlags.S7_OVERLAY) {
+                        suppressSamplingToggle = true
+                        cbSampling.isChecked = true
+                        suppressSamplingToggle = false
+                        showOverlay(sampling)
+                    } else {
+                        overlay.isVisible = false
+                    }
+                    overlayPending = false
+                }
+            } catch (t: Throwable) {
+                Logger.e("PALETTE", "sampling.fail", mapOf("error" to (t.message ?: t.toString())), err = t)
+                runOnUiThread {
+                    samplingRunning = false
+                    overlayPending = false
+                    progress.isVisible = false
+                    cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
+                    suppressSamplingToggle = true
+                    cbSampling.isChecked = false
+                    suppressSamplingToggle = false
+                    overlay.isVisible = false
+                    tvStatus.text = "S7.1 ошибка: ${t.message}"
+                    Toast.makeText(this, "S7.1 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun ensureMasksFor(bmp: Bitmap, uri: Uri): Masks {
+        val cached = cachedMasks
+        val size = cachedMasksSize
+        if (cached != null && size != null && size.width == bmp.width && size.height == bmp.height) {
+            return cached
+        }
+        Logger.i("PALETTE", "sampling.masks.build", mapOf("w" to bmp.width, "h" to bmp.height))
+        val analyze = Stage3Analyze.run(this, uri)
+        val scaled = scaleMasks(analyze.masks, bmp.width, bmp.height)
+        cachedMasks = scaled
+        cachedMasksSize = Size(bmp.width, bmp.height)
+        return scaled
+    }
+
+    private fun scaleMasks(masks: Masks, targetW: Int, targetH: Int): Masks {
+        if (masks.edge.width == targetW && masks.edge.height == targetH) return masks
+        val filter = true
+        return Masks(
+            edge = Bitmap.createScaledBitmap(masks.edge, targetW, targetH, filter),
+            flat = Bitmap.createScaledBitmap(masks.flat, targetW, targetH, filter),
+            hiTexFine = Bitmap.createScaledBitmap(masks.hiTexFine, targetW, targetH, filter),
+            hiTexCoarse = Bitmap.createScaledBitmap(masks.hiTexCoarse, targetW, targetH, filter),
+            skin = Bitmap.createScaledBitmap(masks.skin, targetW, targetH, filter),
+            sky = Bitmap.createScaledBitmap(masks.sky, targetW, targetH, filter)
+        )
+    }
+
+    private fun showOverlay(result: S7SamplingResult) {
+        val size = overlayImageSize ?: baseBitmap?.let { Size(it.width, it.height).also { s -> overlayImageSize = s } }
+        if (size == null) {
+            overlay.isVisible = false
+            return
+        }
+        overlay.setData(size, result, heat = true, points = true)
+        overlay.isVisible = true
+    }
+
+    private fun formatHistogram(roi: Map<S7SamplingSpec.Zone, Int>): String {
+        return S7SamplingSpec.Zone.entries.joinToString(separator = " ") { zone ->
+            val value = roi[zone] ?: 0
+            "${zone.name.lowercase(Locale.ROOT)}=$value"
+        }
     }
 
     companion object {

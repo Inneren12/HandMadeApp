@@ -14,7 +14,7 @@
         android:theme="@style/Theme.HandMadeApp">
 
         <activity
-            android:name="com.appforcross.editor.dev.DevMenuActivity"
+            android:name="com.handmadeapp.editor.dev.DevMenuActivity"
             android:exported="false" />
 
         <!-- Import/Preview Activity (Launcher) -->

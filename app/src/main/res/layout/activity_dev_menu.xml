@@ -51,4 +51,11 @@
         android:layout_marginTop="12dp"
         android:text="Pick image &amp; Analyze (Stage-3)" />
 
+    <Button
+        android:id="@+id/btnPickPresetStage4"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Pick image &amp; PresetGate (Stage-4)" />
+
 </LinearLayout>

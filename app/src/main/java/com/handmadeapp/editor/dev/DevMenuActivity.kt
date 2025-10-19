@@ -18,6 +18,7 @@ import com.handmadeapp.logging.LogLevel
 import com.handmadeapp.logging.Logger
 import com.appforcross.editor.io.ImagePrep
 import com.appforcross.editor.analysis.Stage3Analyze
+import com.appforcross.editor.preset.Stage4Runner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,6 +28,7 @@ import kotlinx.coroutines.withContext
 
 private const val REQ_PICK_IMAGE = 1001
 private const val REQ_PICK_ANALYZE = 1002
+private const val REQ_PICK_PRESET = 1003
 
 class DevMenuActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -40,6 +42,7 @@ class DevMenuActivity : Activity() {
         val btnExport = findViewById<Button>(R.id.btnExportDiag)
         val btnStage2 = findViewById<Button>(R.id.btnPickRunStage2)
         val btnStage3 = findViewById<Button>(R.id.btnPickAnalyzeStage3)
+        val btnStage4 = findViewById<Button>(R.id.btnPickPresetStage4)
 
         scope.launch {
             swDebug.isChecked = DevPrefs.isDebug(this@DevMenuActivity).first()
@@ -87,6 +90,15 @@ class DevMenuActivity : Activity() {
             }
             startActivityForResult(intent, REQ_PICK_ANALYZE)
         }
+
+        btnStage4.setOnClickListener {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivityForResult(intent, REQ_PICK_PRESET)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -112,6 +124,18 @@ class DevMenuActivity : Activity() {
                 // Ignore — best effort only.
             }
             runStage3(uri)
+        }
+
+        if (requestCode == REQ_PICK_PRESET && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            val rawFlags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            val flags = if (rawFlags != 0) rawFlags else Intent.FLAG_GRANT_READ_URI_PERMISSION
+            try {
+                contentResolver.takePersistableUriPermission(uri, flags)
+            } catch (_: Exception) {
+                // Ignore — best effort only.
+            }
+            runStage4(uri)
         }
     }
 
@@ -184,6 +208,40 @@ class DevMenuActivity : Activity() {
                     err = e
                 )
                 Toast.makeText(this@DevMenuActivity, "Stage-3 error: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun runStage4(uri: Uri) {
+        scope.launch {
+            try {
+                val res = withContext(Dispatchers.Default) {
+                    Stage4Runner.run(this@DevMenuActivity, uri, targetWst = 240)
+                }
+                Logger.i(
+                    "PGATE",
+                    "stage4.result",
+                    mapOf(
+                        "uri" to uri.toString(),
+                        "preset" to res.gate.spec.id,
+                        "addons" to res.gate.spec.addons.joinToString(","),
+                        "r" to "%.3f".format(res.gate.r),
+                        "json" to res.jsonPath
+                    )
+                )
+                Toast.makeText(
+                    this@DevMenuActivity,
+                    "Stage-4: ${res.gate.spec.id}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                Logger.e(
+                    "PGATE",
+                    "stage4.fail",
+                    data = mapOf("uri" to uri.toString()),
+                    err = e
+                )
+                Toast.makeText(this@DevMenuActivity, "Stage-4 error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }

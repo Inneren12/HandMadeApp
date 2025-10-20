@@ -1,9 +1,11 @@
 package com.handmadeapp.ui.importer
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.util.AttributeSet
 import android.util.Size
 import android.view.View
@@ -19,7 +21,7 @@ class QuantOverlayView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    private enum class Mode { NONE, SAMPLING, RESIDUAL, SPREAD_BEFORE, SPREAD_AFTER }
+    private enum class Mode { NONE, SAMPLING, RESIDUAL, SPREAD_BEFORE, SPREAD_AFTER, INDEX }
 
     private var imageSize: Size? = null
     private var sampling: S7SamplingResult? = null
@@ -35,6 +37,10 @@ class QuantOverlayView @JvmOverloads constructor(
     private var spreadDeMinAfter: Float = 0f
     private var spreadDe95Before: Float = 0f
     private var spreadDe95After: Float = 0f
+    private var indexShowGrid: Boolean = false
+    private var indexShowCost: Boolean = false
+    private var indexCostBitmap: Bitmap? = null
+    private var indexBpp: Int = 8
     private var mode: Mode = Mode.NONE
 
     init {
@@ -96,6 +102,9 @@ class QuantOverlayView @JvmOverloads constructor(
         this.residualErrors = null
         this.spreadAmbiguity = null
         this.spreadAffected = null
+        this.indexCostBitmap = null
+        this.indexShowGrid = false
+        this.indexShowCost = false
         invalidate()
     }
 
@@ -175,12 +184,48 @@ class QuantOverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun setIndexOverlay(
+        imageSize: Size,
+        indexBpp: Int,
+        showGrid: Boolean,
+        costHeatmap: Bitmap?,
+        showCost: Boolean
+    ) {
+        this.imageSize = imageSize
+        this.sampling = null
+        this.indexBpp = indexBpp
+        this.indexShowGrid = showGrid
+        this.indexCostBitmap = costHeatmap
+        this.indexShowCost = showCost && costHeatmap != null
+        this.mode = Mode.INDEX
+        Logger.i(
+            "PALETTE",
+            "overlay.index.ready",
+            mapOf(
+                "w" to imageSize.width,
+                "h" to imageSize.height,
+                "index_bpp" to indexBpp,
+                "preview" to true,
+                "grid" to showGrid,
+                "cost" to (showCost && costHeatmap != null)
+            )
+        )
+        invalidate()
+    }
+
+    fun updateIndexOverlay(showGrid: Boolean, showCost: Boolean) {
+        this.indexShowGrid = showGrid
+        this.indexShowCost = showCost && indexCostBitmap != null
+        if (mode == Mode.INDEX) {
+            invalidate()
+        }
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val currentMode = mode
         if (currentMode == Mode.NONE) return
         val img = imageSize ?: return
-        val data = sampling ?: return
 
         val viewW = width.toFloat()
         val viewH = height.toFloat()
@@ -193,6 +238,13 @@ class QuantOverlayView @JvmOverloads constructor(
         val density = resources.displayMetrics.density
         val heatRadius = max(12f * density, 32f * scale)
         val pointRadius = max(2.5f * density, 2f)
+
+        if (currentMode == Mode.INDEX) {
+            drawIndexOverlay(canvas, img.width, img.height, offsetX, offsetY, scale)
+            return
+        }
+
+        val data = sampling ?: return
 
         val mapper: (S7Sample) -> Pair<Float, Float> = { sample ->
             val x = offsetX + sample.x * scale
@@ -260,6 +312,33 @@ class QuantOverlayView @JvmOverloads constructor(
                 }
             }
             Mode.NONE -> return
+            Mode.INDEX -> return
+        }
+    }
+
+    private fun drawIndexOverlay(canvas: Canvas, imgW: Int, imgH: Int, offsetX: Float, offsetY: Float, scale: Float) {
+        val showCost = indexShowCost && indexCostBitmap != null
+        val showGrid = indexShowGrid
+        if (!showCost && !showGrid) return
+        if (showCost) {
+            val bitmap = indexCostBitmap ?: return
+            val dest = RectF(offsetX, offsetY, offsetX + imgW * scale, offsetY + imgH * scale)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { alpha = 180 }
+            canvas.drawBitmap(bitmap, null, dest, paint)
+        }
+        if (showGrid) {
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(110, 255, 255, 255)
+                strokeWidth = max(1f, scale * 0.35f)
+            }
+            for (x in 0..imgW) {
+                val px = offsetX + x * scale
+                canvas.drawLine(px, offsetY, px, offsetY + imgH * scale, paint)
+            }
+            for (y in 0..imgH) {
+                val py = offsetY + y * scale
+                canvas.drawLine(offsetX, py, offsetX + imgW * scale, py, paint)
+            }
         }
     }
 }

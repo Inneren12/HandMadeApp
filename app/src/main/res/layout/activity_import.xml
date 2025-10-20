@@ -52,6 +52,13 @@
             android:layout_marginStart="8dp"
             android:text="Finalize K (S7.5)" />
 
+        <Button
+            android:id="@+id/btnIndexK"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Index (S7.6)" />
+
         <CheckBox
             android:id="@+id/cbSampling"
             android:layout_width="wrap_content"
@@ -79,6 +86,20 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:text="S7.4 До" />
+
+        <CheckBox
+            android:id="@+id/cbIndexGrid"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Index grid" />
+
+        <CheckBox
+            android:id="@+id/cbIndexCost"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Cost heatmap" />
 
         <TextView
             android:id="@+id/tvFileName"

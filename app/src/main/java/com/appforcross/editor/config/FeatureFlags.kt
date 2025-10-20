@@ -10,6 +10,7 @@ object FeatureFlags {
     const val S7_GREEDY = true
     const val S7_SPREAD2OPT = true
     const val S7_KNEEDLE = true
+    const val S7_INDEX = true
 
     @Volatile
     private var logged = false
@@ -25,6 +26,7 @@ object FeatureFlags {
             Logger.i("FEATURE", "flag", mapOf("name" to "S7_GREEDY", "enabled" to S7_GREEDY))
             Logger.i("FEATURE", "flag", mapOf("name" to "S7_SPREAD2OPT", "enabled" to S7_SPREAD2OPT))
             Logger.i("FEATURE", "flag", mapOf("name" to "S7_KNEEDLE", "enabled" to S7_KNEEDLE))
+            Logger.i("FEATURE", "flag", mapOf("name" to "S7_INDEX", "enabled" to S7_INDEX))
             logged = true
         }
     }
@@ -39,5 +41,9 @@ object FeatureFlags {
 
     fun logKneedleFlag() {
         Logger.i("FEATURE", "flag", mapOf("name" to "S7_KNEEDLE", "enabled" to S7_KNEEDLE))
+    }
+
+    fun logIndexFlag() {
+        Logger.i("FEATURE", "flag", mapOf("name" to "S7_INDEX", "enabled" to S7_INDEX))
     }
 }

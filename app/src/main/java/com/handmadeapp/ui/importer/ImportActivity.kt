@@ -26,6 +26,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.config.FeatureFlags
+import com.appforcross.editor.palette.S7InitResult
+import com.appforcross.editor.palette.S7InitSpec
+import com.appforcross.editor.palette.S7Initializer
+import com.appforcross.editor.palette.S7PaletteIo
 import com.appforcross.editor.palette.S7Sampler
 import com.appforcross.editor.palette.S7SamplingIo
 import com.appforcross.editor.palette.S7SamplingResult
@@ -56,18 +60,24 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var fileNameView: TextView
     private lateinit var btnProcess: Button
     private lateinit var tvStatus: TextView
+    private lateinit var btnInitK0: Button
+    private lateinit var cbPalette: CheckBox
+    private lateinit var paletteStrip: PaletteStripView
     private lateinit var cbSampling: CheckBox
     private lateinit var overlay: QuantOverlayView
 
     private var baseBitmap: Bitmap? = null
     private var currentUri: Uri? = null
     private var lastSampling: S7SamplingResult? = null
+    private var lastInit: S7InitResult? = null
     private var overlayImageSize: Size? = null
     private var cachedMasks: Masks? = null
     private var cachedMasksSize: Size? = null
     private var samplingRunning = false
     private var overlayPending = false
+    private var initRunning = false
     private var suppressSamplingToggle = false
+    private var suppressPaletteToggle = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -81,15 +91,24 @@ class ImportActivity : AppCompatActivity() {
         progress = findViewById(R.id.progress)
         fileNameView = findViewById(R.id.tvFileName)
         btnProcess = findViewById(R.id.btnProcess)
+        btnInitK0 = findViewById(R.id.btnInitK0)
         tvStatus = findViewById(R.id.tvStatus)
         cbSampling = findViewById(R.id.cbSampling)
+        cbPalette = findViewById(R.id.cbPalette)
         overlay = findViewById(R.id.quantOverlay)
+        paletteStrip = findViewById(R.id.paletteStrip)
 
         FeatureFlags.logFlagsOnce()
         cbSampling.isEnabled = false
         cbSampling.isChecked = false
         overlay.isVisible = false
         cbSampling.isVisible = FeatureFlags.S7_SAMPLING || FeatureFlags.S7_OVERLAY
+        btnInitK0.isVisible = FeatureFlags.S7_INIT
+        btnInitK0.isEnabled = false
+        cbPalette.isVisible = FeatureFlags.S7_INIT
+        cbPalette.isEnabled = false
+        cbPalette.isChecked = false
+        paletteStrip.isVisible = false
 
         cbSampling.setOnCheckedChangeListener { _, isChecked ->
             if (suppressSamplingToggle) return@setOnCheckedChangeListener
@@ -110,6 +129,12 @@ class ImportActivity : AppCompatActivity() {
                     overlay.setData(it, null, heat = false, points = false)
                 }
             }
+        }
+
+        cbPalette.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressPaletteToggle) return@setOnCheckedChangeListener
+            if (!FeatureFlags.S7_INIT) return@setOnCheckedChangeListener
+            paletteStrip.isVisible = isChecked && lastInit != null
         }
 
         pickBtn.setOnClickListener {
@@ -144,6 +169,10 @@ class ImportActivity : AppCompatActivity() {
             } else {
                 runPipeline(uri, targetWst = 240)
             }
+        }
+
+        btnInitK0.setOnClickListener {
+            startPaletteInit()
         }
     }
 
@@ -202,6 +231,7 @@ class ImportActivity : AppCompatActivity() {
         tvStatus.text = "Запуск конвейера…"
         progress.isVisible = true
         btnProcess.isEnabled = false
+        btnInitK0.isEnabled = false
 
         Thread {
             try {
@@ -233,6 +263,7 @@ class ImportActivity : AppCompatActivity() {
                     }
                     progress.isVisible = false
                     btnProcess.isEnabled = true
+                    btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     Toast.makeText(this, "Конвейер завершён", Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
@@ -240,6 +271,7 @@ class ImportActivity : AppCompatActivity() {
                 runOnUiThread {
                     progress.isVisible = false
                     btnProcess.isEnabled = true
+                    btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     tvStatus.text = "Ошибка конвейера: ${t.message}"
                     Toast.makeText(this, "Ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
@@ -342,8 +374,10 @@ class ImportActivity : AppCompatActivity() {
 
     private fun resetSamplingState() {
         lastSampling = null
+        lastInit = null
         overlayPending = false
         samplingRunning = false
+        initRunning = false
         cachedMasks = null
         cachedMasksSize = null
         overlayImageSize = null
@@ -351,6 +385,7 @@ class ImportActivity : AppCompatActivity() {
         cbSampling.isChecked = false
         suppressSamplingToggle = false
         overlay.isVisible = false
+        resetPaletteState()
     }
 
     private fun startSamplingInBackground(showOverlayWhenDone: Boolean) {
@@ -374,6 +409,7 @@ class ImportActivity : AppCompatActivity() {
         cbSampling.isEnabled = false
         progress.isVisible = true
         tvStatus.text = "S7.1: считаем выборку…"
+        btnInitK0.isEnabled = false
 
         Thread {
             try {
@@ -399,6 +435,8 @@ class ImportActivity : AppCompatActivity() {
                     tvStatus.text = "S7.1: ${sampling.samples.size} семплов • coverage=$coverageState • $hist • готово к S7.2"
                     progress.isVisible = false
                     cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
+                    btnInitK0.isEnabled = FeatureFlags.S7_INIT
+                    resetPaletteState()
                     if (overlayPending && FeatureFlags.S7_OVERLAY) {
                         suppressSamplingToggle = true
                         cbSampling.isChecked = true
@@ -416,6 +454,7 @@ class ImportActivity : AppCompatActivity() {
                     overlayPending = false
                     progress.isVisible = false
                     cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
+                    btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     suppressSamplingToggle = true
                     cbSampling.isChecked = false
                     suppressSamplingToggle = false
@@ -462,6 +501,89 @@ class ImportActivity : AppCompatActivity() {
         }
         overlay.setData(size, result, heat = true, points = true)
         overlay.isVisible = true
+    }
+
+    private fun startPaletteInit() {
+        if (!FeatureFlags.S7_INIT) return
+        val sampling = lastSampling
+        if (sampling == null) {
+            Toast.makeText(this, "Сначала выполните S7.1", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (initRunning) {
+            tvStatus.text = "S7.2: уже выполняется…"
+            return
+        }
+        initRunning = true
+        btnInitK0.isEnabled = false
+        cbPalette.isEnabled = false
+        progress.isVisible = true
+        tvStatus.text = "S7.2: инициализация палитры…"
+
+        val seed = (sampling.params["seed"] as? Number)?.toLong() ?: S7InitSpec.DEFAULT_SEED
+
+        Thread {
+            try {
+                val result = S7Initializer.run(sampling, seed)
+                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                    try {
+                        S7PaletteIo.writeInitJson(dir, result)
+                        S7PaletteIo.writeStripPng(dir, result)
+                        S7PaletteIo.writeRolesCsv(dir, result)
+                    } catch (io: Throwable) {
+                        Logger.w("PALETTE", "palette.io.fail", mapOf("error" to (io.message ?: "io")))
+                    }
+                }
+                runOnUiThread {
+                    initRunning = false
+                    lastInit = result
+                    btnInitK0.isEnabled = FeatureFlags.S7_INIT
+                    progress.isVisible = false
+                    updatePalettePreview(result)
+                    val minSpread = result.colors.minOfOrNull { if (it.spreadMin.isInfinite()) Float.MAX_VALUE else it.spreadMin }
+                    val spreadStr = if (minSpread == null || minSpread == Float.MAX_VALUE) "∞" else "%.2f".format(minSpread)
+                    val clippedCount = result.colors.count { it.clipped }
+                    val anchors = formatAnchors(result)
+                    tvStatus.text = "K0 готов: K=${result.colors.size}; anchors: $anchors; min spread=$spreadStr; clipped=$clippedCount"
+                }
+            } catch (t: Throwable) {
+                Logger.e("PALETTE", "init.fail", mapOf("stage" to "S7.2", "error" to (t.message ?: t.toString())), err = t)
+                runOnUiThread {
+                    initRunning = false
+                    progress.isVisible = false
+                    btnInitK0.isEnabled = FeatureFlags.S7_INIT
+                    tvStatus.text = "S7.2 ошибка: ${t.message}"
+                    Toast.makeText(this, "S7.2 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun updatePalettePreview(result: S7InitResult) {
+        paletteStrip.setPalette(result)
+        suppressPaletteToggle = true
+        cbPalette.isChecked = true
+        suppressPaletteToggle = false
+        cbPalette.isEnabled = true
+        cbPalette.isVisible = true
+        paletteStrip.isVisible = true
+    }
+
+    private fun resetPaletteState() {
+        lastInit = null
+        paletteStrip.setPalette(null)
+        paletteStrip.isVisible = false
+        suppressPaletteToggle = true
+        cbPalette.isChecked = false
+        suppressPaletteToggle = false
+        cbPalette.isEnabled = false
+        cbPalette.isVisible = FeatureFlags.S7_INIT && lastSampling != null
+        btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null && !samplingRunning
+    }
+
+    private fun formatAnchors(init: S7InitResult): String {
+        if (init.anchors.isEmpty()) return "нет"
+        return init.anchors.entries.sortedBy { it.value }.joinToString(separator = ", ") { "${it.key}→${it.value}" }
     }
 
     private fun formatHistogram(roi: Map<S7SamplingSpec.Zone, Int>): String {

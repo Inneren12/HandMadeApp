@@ -59,7 +59,6 @@ object S7Initializer {
         params["seed"] = rngSeed
         params["Nsamp"] = totalSamples
         params["coverage"] = coverage.mapKeys { it.key.name }
-        params["free_slots"] = max(0, S7InitSpec.K0_TARGET - protectedColors.size)
 
         val protectedColors = ArrayList<MutableColor>()
         val anchorIndices = LinkedHashMap<String, Int>()
@@ -78,23 +77,32 @@ object S7Initializer {
         val skyAnchor = detectSkyAnchor(sampling, skyCoverage, notes)
         skinAnchor?.let { protectedColors += it.copy(anchorName = "skin") }
         skyAnchor?.let { protectedColors += it.copy(anchorName = "sky") }
+        params["free_slots"] = max(0, S7InitSpec.K0_TARGET - protectedColors.size)
 
         Logger.i(
             "PALETTE",
             "anchors.detect",
-            mapOf(
-                "black" to mapOf("L" to black.lab[0], "C" to chroma(black.lab)),
-                "white" to mapOf("L" to white.lab[0], "C" to chroma(white.lab)),
-                "neutral_mid" to mapOf("L" to neutral.lab[0], "a" to neutral.lab[1], "b" to neutral.lab[2]),
-                "skin" to skinAnchor?.let { mapOf("ok" to true) } ?: mapOf(
-                    "ok" to false,
-                    "reason" to if (skinCoverage >= S7InitSpec.TAU_COVER) "no_candidate" else "fallback"
-                ),
-                "sky" to skyAnchor?.let { mapOf("ok" to true) } ?: mapOf(
-                    "ok" to false,
-                    "reason" to if (skyCoverage >= S7InitSpec.TAU_COVER) "no_candidate" else "fallback"
+            run {
+                val skinNote: Map<String, Any> =
+                    if (skinAnchor != null) mapOf("ok" to true)
+                    else mapOf(
+                        "ok" to false,
+                "reason" to if (skinCoverage >= S7InitSpec.TAU_COVER) "no_candidate" else "fallback"
                 )
-            )
+                val skyNote: Map<String, Any> =
+                    if (skyAnchor != null) mapOf("ok" to true)
+                    else mapOf(
+                        "ok" to false,
+                "reason" to if (skyCoverage >= S7InitSpec.TAU_COVER) "no_candidate" else "fallback"
+                )
+                linkedMapOf<String, Any>(
+                    "black"       to mapOf<String, Any>("L" to black.lab[0],   "C" to chroma(black.lab)),
+                    "white"       to mapOf<String, Any>("L" to white.lab[0],   "C" to chroma(white.lab)),
+                    "neutral_mid" to mapOf<String, Any>("L" to neutral.lab[0], "a" to neutral.lab[1], "b" to neutral.lab[2]),
+                    "skin"        to skinNote,
+                    "sky"         to skyNote
+                )
+            }
         )
 
         val requestedK = max(S7InitSpec.K0_TARGET, protectedColors.size)

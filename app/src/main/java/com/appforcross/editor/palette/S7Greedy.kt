@@ -106,7 +106,7 @@ object S7Greedy {
         var addedTotal = 0
 
         if (kTry > 0) {
-            repeat(kTry) {
+            for (iter in 0 until kTry) {
                 val currentK = palette.size
                 val histogram = buildHistogram(samples, currentResidual.importances, binIndices)
                 val selection = selectBin(histogram, roiCounts, roiQuotas, currentK)
@@ -220,8 +220,7 @@ object S7Greedy {
                     )
                 )
 
-                if (!added && consecutiveSkips >= 3) {
-                    break
+                if (!added && consecutiveSkips >= 3) { break
                 }
             }
         }

@@ -70,6 +70,7 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.pow
+import com.appforcross.editor.palette.S7OverlayRenderer
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
  * Реализовано без зависимостей на Activity Result API (для совместимости) — используем onActivityResult.

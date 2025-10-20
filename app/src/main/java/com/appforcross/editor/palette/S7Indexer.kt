@@ -3,6 +3,7 @@ package com.appforcross.editor.palette
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.util.Log
 import com.appforcross.editor.config.FeatureFlags
 import com.handmadeapp.analysis.Masks
 import com.handmadeapp.diagnostics.DiagnosticsManager
@@ -306,6 +307,8 @@ object S7Indexer {
                 "time_ms" to stats.timeMs
             )
         )
+
+        Log.i("AiX/PALETTE", "Index built: K*=${paletteK.size}, index_bpp=$indexBpp")
 
         return S7IndexResult(
             width = width,

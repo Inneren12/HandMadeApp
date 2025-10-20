@@ -29,6 +29,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.config.FeatureFlags
+import com.appforcross.editor.palette.PaletteLogcat
 import com.appforcross.editor.palette.S7Greedy
 import com.appforcross.editor.palette.S7GreedyIo
 import com.appforcross.editor.palette.S7GreedyResult
@@ -1295,6 +1296,7 @@ class ImportActivity : AppCompatActivity() {
                         S7KneedleIo.writeGainCsv(dir, result.rows)
                         S7KneedleIo.writeKneedlePng(dir, result.rows, result.Kstar)
                         S7KneedleIo.writeFinalPalette(dir, finalPalette, result.Kstar)
+                        PaletteLogcat.printFinalPalette(finalPalette, headN = 20)
                         residualBitmap?.let { bmp ->
                             S7KneedleIo.writeResidualHeatmap(dir, bmp, result.Kstar)
                         }

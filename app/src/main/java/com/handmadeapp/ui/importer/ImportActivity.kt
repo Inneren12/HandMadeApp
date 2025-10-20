@@ -28,6 +28,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
+<<<<<<< Updated upstream
 import com.appforcross.editor.config.FeatureFlags
 import com.appforcross.editor.palette.PaletteLogcat
 import com.appforcross.editor.palette.S7Greedy
@@ -54,6 +55,11 @@ import com.appforcross.editor.palette.S7Spread2OptIo
 import com.appforcross.editor.palette.S7Spread2OptResult
 import com.appforcross.editor.palette.S7Spread2OptSpec
 import com.appforcross.editor.palette.S7SpreadViolation
+=======
+import com.handmadeapp.analysis.Stage3Analyze
+import com.handmadeapp.preset.Stage4Runner
+import com.handmadeapp.prescale.PreScaleRunner
+>>>>>>> Stashed changes
 import com.handmadeapp.R
 import com.handmadeapp.analysis.Masks
 import com.handmadeapp.analysis.Stage3Analyze

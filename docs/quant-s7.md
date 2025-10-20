@@ -82,3 +82,29 @@
 * `PALETTE.greedy.start/cluster/medoid/iter.done/done` — параметры запуска, выбранные бины, действия с медиоидами и метрики.
 * Оверлей: `PALETTE.overlay.residual.ready {w,h,de95,deMed}`.
 * Ошибки: `PALETTE.greedy.fail {stage, err}`.
+
+# S7.4 Spread ≥ 3.5 + Budget 2-opt
+
+## Цель и шаги
+
+* Флаг функции: `FEATURE.S7_SPREAD2OPT` (`FEATURE.flag` логируется при обращении и в `S7Spread2Opt.run`).
+* На входе — результаты S7.1 (выборка) и S7.3 (палитра после greedy). Цель: поднять минимальный spread палитры до `ΔE00 ≥ 3.5` и при этом улучшить остаточную ошибку без роста `K`.
+* Алгоритм формирует матрицу попарных расстояний, выбирает пары с нарушением spread и выполняет «push-apart» (сдвиг навстречу нормали) с шагом не больше `δ_max=0.6`. После сдвига рассматривается локальная 2-медоидная корректировка по семплам пары.
+* Для каждой пары оцениваются три варианта (до, push, medoid) по gain-функции `gain = α·ΔΔE95 + β·ΔGBI − μ·Σ|shift|` с константами `α=1.0`, `β=0.6`, `μ=0.05`. Кандидат принимается только при положительном gain и допустимом клипе (`Δclip ≤ 1.0`).
+* Пары сортируются по `pscore = (s_min - ΔE)_+ + γ_err·(Imp_i + Imp_j) / Imp_total` (γ_err=0.5), количество пар ограничено профилем устройства (`M_low=12`, `M_mid=24`, `M_high=36`). Тайм-бюджеты: LOW=250 мс, MID=400 мс, HIGH=650 мс.
+* Выполняется до двух проходов (по умолчанию — один) или до исчерпания `time_budget_ms`.
+
+## Артефакты и логирование
+
+* Матрицы и нарушения до/после: `dist_matrix_before.csv`, `dist_matrix_after.csv`, `violations_before.csv`, `violations_after.csv`.
+* Принятые/отклонённые фиксы: `2opt_fixes.csv` (индексы, ΔE, gain, причина, перемещения).
+* Ленточки палитры: `palette_strip_before.png`, `palette_strip_after.png` с подсветкой конфликтных цветов.
+* Карты: `affected_before.png` (ambiguity heatmap) и `affected_after.png` (изменившиеся назначения).
+* Логи: `PALETTE.spread2opt.start/done`, `PALETTE.spread.violations`, `PALETTE.spread.pair`, `PALETTE.spread.clip`, `PALETTE.2opt.iter`, `PALETTE.overlay.spread.ready`, ошибки — `PALETTE.spread2opt.fail`.
+
+## Live Preview
+
+* На экране импорта появилась кнопка **Spread 2-opt** (после выполнения S7.3). Запуск — асинхронный, прогресс отображается через общий `ProgressBar` и строку статуса.
+* Чекбокс **S7.4 До** переключает ленточку и overlay между состояниями «до» (ambiguity heatmap + подсветка конфликтов) и «после» (affected heatmap, обновлённая палитра).
+* `QuantOverlayView` получает режим SPREAD и показывает две карты: «ambiguity» (до) и «affected» (после). Строка статуса выводит minΔE, ΔE95, GBI и статистику фиксов.
+* При клиппинге новые координаты логируются (`PALETTE.spread.clip`). При преждевременном выходе по бюджету записывается `reason=time_budget`.

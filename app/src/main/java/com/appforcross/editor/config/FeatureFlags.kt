@@ -8,6 +8,7 @@ object FeatureFlags {
     const val S7_INIT = true
     const val S7_INIT_FALLBACKS = true
     const val S7_GREEDY = true
+    const val S7_SPREAD2OPT = true
 
     @Volatile
     private var logged = false
@@ -21,11 +22,16 @@ object FeatureFlags {
             Logger.i("FEATURE", "flag", mapOf("name" to "S7_INIT", "enabled" to S7_INIT))
             Logger.i("FEATURE", "flag", mapOf("name" to "S7_INIT_FALLBACKS", "enabled" to S7_INIT_FALLBACKS))
             Logger.i("FEATURE", "flag", mapOf("name" to "S7_GREEDY", "enabled" to S7_GREEDY))
+            Logger.i("FEATURE", "flag", mapOf("name" to "S7_SPREAD2OPT", "enabled" to S7_SPREAD2OPT))
             logged = true
         }
     }
 
     fun logGreedyFlag() {
         Logger.i("FEATURE", "flag", mapOf("name" to "S7_GREEDY", "enabled" to S7_GREEDY))
+    }
+
+    fun logSpread2OptFlag() {
+        Logger.i("FEATURE", "flag", mapOf("name" to "S7_SPREAD2OPT", "enabled" to S7_SPREAD2OPT))
     }
 }

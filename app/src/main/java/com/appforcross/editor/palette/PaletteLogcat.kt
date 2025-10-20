@@ -67,6 +67,96 @@ object PaletteLogcat {
         )
     }
 
+    /**
+     * Компактный формат для logcat: роли в виде аббревиатур SKY, SKN, EDG, HTX, FLT, NEU
+     * и короткая "голова" палитры (по умолчанию 8 цветов).
+     */
+    @JvmStatic
+    fun printFinalPaletteCompact(
+        colors: List<S7InitColor>,
+        headN: Int = 8,
+        tagCat: String = "PALETTE"
+    ) {
+        val k = colors.size
+        if (k == 0) {
+            Log.i("AiX/$tagCat", "K*=0")
+            Logger.i(tagCat, "palette.summary.compact", mapOf("K" to 0))
+            return
+        }
+
+        val minSpread = minDeltaE00(colors)
+        val rolesCompact = compactRolesSummary(colors)
+
+        val n = headN.coerceAtMost(k)
+        val head = colors.take(n).joinToString(",") { "#%06X".format(it.sRGB and 0xFFFFFF) }
+        val more = (k - n).coerceAtLeast(0)
+        val moreStr = if (more > 0) " …+$more" else ""
+
+        Log.i(
+            "AiX/$tagCat",
+            "K*=%d minΔE=%.2f roles{%s} head%d=%s%s".format(k, minSpread, rolesCompact, n, head, moreStr)
+        )
+
+        Logger.i(
+            tagCat,
+            "palette.summary.compact",
+            mapOf(
+                "K" to k,
+                "minSpread" to String.format("%.2f", minSpread),
+                "roles" to rolesCompact,
+                "headN" to n,
+                "head" to head,
+                "more" to more
+            )
+        )
+    }
+
+    /**
+     * Компактная строка для UI-статуса: "S7.5: K*=42 | roles SKY=7 SKN=8 EDG=6 | minΔE=3.68"
+     * Можно передать de95/GBI, если есть.
+     */
+    @JvmStatic
+    fun buildUiStatusCompact(
+        colors: List<S7InitColor>,
+        prefix: String = "S7.5",
+        de95: Float? = null,
+        gbi: Float? = null
+    ): String {
+        val k = colors.size
+        val minSpread = minDeltaE00(colors)
+        val roles = compactRolesSummary(colors).replace(',', ' ')
+
+        val parts = mutableListOf<String>()
+        parts += "$prefix: K*=$k"
+        parts += "roles $roles"
+        parts += "minΔE=%.2f".format(minSpread)
+        if (de95 != null) parts += "ΔE95=%.2f".format(de95)
+        if (gbi != null) parts += "GBI=%.3f".format(gbi)
+        return parts.joinToString(" | ")
+    }
+
+    private fun compactRolesSummary(colors: List<S7InitColor>): String {
+        val order = listOf(
+            S7InitSpec.PaletteZone.SKY,
+            S7InitSpec.PaletteZone.SKIN,
+            S7InitSpec.PaletteZone.EDGE,
+            S7InitSpec.PaletteZone.HITEX,
+            S7InitSpec.PaletteZone.FLAT,
+            S7InitSpec.PaletteZone.NEUTRAL
+        )
+        val abbr = mapOf(
+            S7InitSpec.PaletteZone.SKY to "SKY",
+            S7InitSpec.PaletteZone.SKIN to "SKN",
+            S7InitSpec.PaletteZone.EDGE to "EDG",
+            S7InitSpec.PaletteZone.HITEX to "HTX",
+            S7InitSpec.PaletteZone.FLAT to "FLT",
+            S7InitSpec.PaletteZone.NEUTRAL to "NEU"
+        )
+
+        val counts = colors.groupingBy { it.role }.eachCount()
+        return order.joinToString(",") { role -> "${abbr[role]}=${counts[role] ?: 0}" }
+    }
+
     private fun minDeltaE00(colors: List<S7InitColor>): Float {
         if (colors.size < 2) return 0f
         var min = Float.POSITIVE_INFINITY

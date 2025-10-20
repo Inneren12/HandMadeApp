@@ -2,6 +2,8 @@ package com.handmadeapp.ui.importer
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.util.AttributeSet
 import android.util.Size
 import android.view.View
@@ -17,7 +19,7 @@ class QuantOverlayView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    private enum class Mode { NONE, SAMPLING, RESIDUAL }
+    private enum class Mode { NONE, SAMPLING, RESIDUAL, SPREAD_BEFORE, SPREAD_AFTER }
 
     private var imageSize: Size? = null
     private var sampling: S7SamplingResult? = null
@@ -26,6 +28,13 @@ class QuantOverlayView @JvmOverloads constructor(
     private var residualErrors: FloatArray? = null
     private var residualDeMed: Float = 0f
     private var residualDe95: Float = 0f
+    private var spreadAmbiguity: FloatArray? = null
+    private var spreadAffected: FloatArray? = null
+    private var spreadMaxAmbiguity: Float = 0f
+    private var spreadDeMinBefore: Float = 0f
+    private var spreadDeMinAfter: Float = 0f
+    private var spreadDe95Before: Float = 0f
+    private var spreadDe95After: Float = 0f
     private var mode: Mode = Mode.NONE
 
     init {
@@ -39,6 +48,8 @@ class QuantOverlayView @JvmOverloads constructor(
         this.showHeat = heat
         this.showPoints = points
         this.residualErrors = null
+        this.spreadAmbiguity = null
+        this.spreadAffected = null
         this.mode = if (sampling != null && (heat || points)) Mode.SAMPLING else Mode.NONE
         Logger.i(
             "PALETTE",
@@ -61,6 +72,8 @@ class QuantOverlayView @JvmOverloads constructor(
         this.residualErrors = errors
         this.residualDeMed = deMed
         this.residualDe95 = de95
+        this.spreadAmbiguity = null
+        this.spreadAffected = null
         this.mode = if (sampling != null && errors != null) Mode.RESIDUAL else Mode.NONE
         if (mode == Mode.RESIDUAL) {
             Logger.i(
@@ -81,6 +94,84 @@ class QuantOverlayView @JvmOverloads constructor(
         this.mode = Mode.NONE
         this.sampling = null
         this.residualErrors = null
+        this.spreadAmbiguity = null
+        this.spreadAffected = null
+        invalidate()
+    }
+
+    fun setSpreadData(
+        imageSize: Size,
+        sampling: S7SamplingResult?,
+        ambiguity: FloatArray?,
+        affected: FloatArray?,
+        showBefore: Boolean,
+        deMinBefore: Float,
+        de95Before: Float,
+        deMinAfter: Float,
+        de95After: Float
+    ) {
+        this.imageSize = imageSize
+        this.sampling = sampling
+        this.showHeat = true
+        this.showPoints = false
+        this.residualErrors = null
+        this.spreadAmbiguity = ambiguity
+        this.spreadAffected = affected
+        this.spreadMaxAmbiguity = ambiguity?.maxOrNull() ?: 0f
+        this.spreadDeMinBefore = deMinBefore
+        this.spreadDe95Before = de95Before
+        this.spreadDeMinAfter = deMinAfter
+        this.spreadDe95After = de95After
+        this.mode = when {
+            sampling == null -> Mode.NONE
+            showBefore && ambiguity != null -> Mode.SPREAD_BEFORE
+            !showBefore && affected != null -> Mode.SPREAD_AFTER
+            showBefore -> Mode.NONE
+            else -> Mode.NONE
+        }
+        val affectedCount = affected?.count { it > 0f } ?: 0
+        val currentMode = if (mode == Mode.SPREAD_BEFORE) "before" else if (mode == Mode.SPREAD_AFTER) "after" else "none"
+        val deMin = if (mode == Mode.SPREAD_BEFORE) deMinBefore else deMinAfter
+        val de95 = if (mode == Mode.SPREAD_BEFORE) de95Before else de95After
+        Logger.i(
+            "PALETTE",
+            "overlay.spread.ready",
+            mapOf(
+                "mode" to currentMode,
+                "affected_px" to affectedCount,
+                "deMin" to deMin,
+                "de95" to de95
+            )
+        )
+        invalidate()
+    }
+
+    fun setSpreadMode(showBefore: Boolean) {
+        val samplingData = sampling
+        if (samplingData == null) {
+            mode = Mode.NONE
+            invalidate()
+            return
+        }
+        mode = when {
+            showBefore && spreadAmbiguity != null -> Mode.SPREAD_BEFORE
+            !showBefore && spreadAffected != null -> Mode.SPREAD_AFTER
+            else -> Mode.NONE
+        }
+        val affectedCount = spreadAffected?.count { it > 0f } ?: 0
+        val currentMode = if (mode == Mode.SPREAD_BEFORE) "before" else if (mode == Mode.SPREAD_AFTER) "after" else "none"
+        val deMin = if (mode == Mode.SPREAD_BEFORE) spreadDeMinBefore else spreadDeMinAfter
+        val de95 = if (mode == Mode.SPREAD_BEFORE) spreadDe95Before else spreadDe95After
+        Logger.i(
+            "PALETTE",
+            "overlay.spread.ready",
+            mapOf(
+                "mode" to currentMode,
+                "affected_px" to affectedCount,
+                "deMin" to deMin,
+                "de95" to de95
+            )
+        )
         invalidate()
     }
 
@@ -134,6 +225,39 @@ class QuantOverlayView @JvmOverloads constructor(
                     deMed = residualDeMed,
                     de95 = residualDe95
                 )
+            }
+            Mode.SPREAD_BEFORE -> {
+                val ambiguity = spreadAmbiguity ?: return
+                if (ambiguity.size != data.samples.size) return
+                val radius = max(18f * density, 32f * scale)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+                val maxValue = spreadMaxAmbiguity.coerceAtLeast(1e-6f)
+                for (idx in data.samples.indices) {
+                    val value = ambiguity[idx]
+                    if (value <= 0f) continue
+                    val norm = (value / maxValue).coerceIn(0f, 1f)
+                    val alpha = (40f + 200f * norm).toInt().coerceIn(0, 255)
+                    val color = Color.argb(alpha, 255, (120 + 80 * norm).toInt().coerceIn(0, 255), 32)
+                    paint.color = color
+                    val (x, y) = mapper(data.samples[idx])
+                    canvas.drawCircle(x, y, radius, paint)
+                }
+            }
+            Mode.SPREAD_AFTER -> {
+                val affected = spreadAffected ?: return
+                if (affected.size != data.samples.size) return
+                val radius = max(18f * density, 32f * scale)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+                for (idx in data.samples.indices) {
+                    val value = affected[idx]
+                    if (value <= 0f) continue
+                    val norm = value.coerceIn(0f, 1f)
+                    val alpha = (70f + 180f * norm).toInt().coerceIn(0, 255)
+                    val color = Color.argb(alpha, 64, (160 + 70 * norm).toInt().coerceIn(0, 255), 255)
+                    paint.color = color
+                    val (x, y) = mapper(data.samples[idx])
+                    canvas.drawCircle(x, y, radius, paint)
+                }
             }
             Mode.NONE -> return
         }

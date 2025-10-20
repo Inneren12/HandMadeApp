@@ -4,10 +4,13 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
@@ -39,6 +42,11 @@ import com.appforcross.editor.palette.S7Sampler
 import com.appforcross.editor.palette.S7SamplingIo
 import com.appforcross.editor.palette.S7SamplingResult
 import com.appforcross.editor.palette.S7SamplingSpec
+import com.appforcross.editor.palette.S7Spread2Opt
+import com.appforcross.editor.palette.S7Spread2OptIo
+import com.appforcross.editor.palette.S7Spread2OptResult
+import com.appforcross.editor.palette.S7Spread2OptSpec
+import com.appforcross.editor.palette.S7SpreadViolation
 import com.handmadeapp.R
 import com.handmadeapp.analysis.Masks
 import com.handmadeapp.analysis.Stage3Analyze
@@ -68,9 +76,11 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
+    private lateinit var btnSpread2Opt: Button
     private lateinit var cbPalette: CheckBox
     private lateinit var paletteStrip: PaletteStripView
     private lateinit var cbSampling: CheckBox
+    private lateinit var cbSpreadBeforeAfter: CheckBox
     private lateinit var overlay: QuantOverlayView
 
     private var baseBitmap: Bitmap? = null
@@ -86,14 +96,20 @@ class ImportActivity : AppCompatActivity() {
     private var overlayPending = false
     private var initRunning = false
     private var greedyRunning = false
+    private var spreadRunning = false
     private var suppressSamplingToggle = false
     private var suppressPaletteToggle = false
+    private var suppressSpreadToggle = false
     private var residualErrors: FloatArray? = null
     private var residualDeMed: Float = 0f
     private var residualDe95: Float = 0f
     private var overlayMode: OverlayMode = OverlayMode.NONE
+    private var lastSpread: S7Spread2OptResult? = null
+    private var paletteBeforeSpread: List<S7InitColor>? = null
+    private var spreadAmbiguity: FloatArray? = null
+    private var spreadAffected: FloatArray? = null
 
-    private enum class OverlayMode { NONE, SAMPLING, RESIDUAL }
+    private enum class OverlayMode { NONE, SAMPLING, RESIDUAL, SPREAD }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,9 +125,11 @@ class ImportActivity : AppCompatActivity() {
         btnProcess = findViewById(R.id.btnProcess)
         btnInitK0 = findViewById(R.id.btnInitK0)
         btnGrowK = findViewById(R.id.btnGrowK)
+        btnSpread2Opt = findViewById(R.id.btnSpread2Opt)
         tvStatus = findViewById(R.id.tvStatus)
         cbSampling = findViewById(R.id.cbSampling)
         cbPalette = findViewById(R.id.cbPalette)
+        cbSpreadBeforeAfter = findViewById(R.id.cbSpreadBeforeAfter)
         overlay = findViewById(R.id.quantOverlay)
         paletteStrip = findViewById(R.id.paletteStrip)
 
@@ -124,10 +142,15 @@ class ImportActivity : AppCompatActivity() {
         btnInitK0.isEnabled = false
         btnGrowK.isVisible = FeatureFlags.S7_GREEDY
         btnGrowK.isEnabled = false
+        btnSpread2Opt.isVisible = FeatureFlags.S7_SPREAD2OPT
+        btnSpread2Opt.isEnabled = false
         cbPalette.isVisible = FeatureFlags.S7_INIT
         cbPalette.isEnabled = false
         cbPalette.isChecked = false
         paletteStrip.isVisible = false
+        cbSpreadBeforeAfter.isVisible = false
+        cbSpreadBeforeAfter.isEnabled = false
+        cbSpreadBeforeAfter.isChecked = false
 
         cbSampling.setOnCheckedChangeListener { _, isChecked ->
             if (suppressSamplingToggle) return@setOnCheckedChangeListener
@@ -138,6 +161,11 @@ class ImportActivity : AppCompatActivity() {
             if (suppressPaletteToggle) return@setOnCheckedChangeListener
             if (!FeatureFlags.S7_INIT) return@setOnCheckedChangeListener
             paletteStrip.isVisible = isChecked && lastPaletteColors != null
+        }
+
+        cbSpreadBeforeAfter.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressSpreadToggle) return@setOnCheckedChangeListener
+            handleSpreadToggle(isChecked)
         }
 
         pickBtn.setOnClickListener {
@@ -180,6 +208,10 @@ class ImportActivity : AppCompatActivity() {
 
         btnGrowK.setOnClickListener {
             startPaletteGrowth()
+        }
+
+        btnSpread2Opt.setOnClickListener {
+            startSpread2Opt()
         }
     }
 
@@ -384,12 +416,22 @@ class ImportActivity : AppCompatActivity() {
         lastInit = null
         lastPaletteColors = null
         lastGreedy = null
+        lastSpread = null
+        paletteBeforeSpread = null
+        spreadAmbiguity = null
+        spreadAffected = null
+        spreadRunning = false
         residualErrors = null
         overlayMode = OverlayMode.NONE
         overlayPending = false
         samplingRunning = false
         initRunning = false
         greedyRunning = false
+        suppressSpreadToggle = true
+        cbSpreadBeforeAfter.isChecked = false
+        suppressSpreadToggle = false
+        cbSpreadBeforeAfter.isVisible = false
+        cbSpreadBeforeAfter.isEnabled = false
         cachedMasks = null
         cachedMasksSize = null
         overlayImageSize = null
@@ -398,6 +440,7 @@ class ImportActivity : AppCompatActivity() {
         suppressSamplingToggle = false
         overlay.isVisible = false
         overlay.clearOverlay()
+        btnSpread2Opt.isEnabled = false
         resetPaletteState()
     }
 
@@ -535,6 +578,36 @@ class ImportActivity : AppCompatActivity() {
         overlayMode = OverlayMode.RESIDUAL
     }
 
+    private fun showSpreadOverlay(showBefore: Boolean, reinit: Boolean) {
+        val sampling = lastSampling ?: return
+        val spread = lastSpread ?: return
+        val size = ensureOverlaySize() ?: return
+        val ambiguity = spreadAmbiguity
+        val affected = spreadAffected
+        if (showBefore && ambiguity == null) return
+        if (!showBefore && affected == null) return
+        if (reinit) {
+            overlay.setSpreadData(
+                size,
+                sampling,
+                ambiguity,
+                affected,
+                showBefore,
+                spread.deMinBefore,
+                spread.de95Before,
+                spread.deMinAfter,
+                spread.de95After
+            )
+        } else {
+            overlay.setSpreadMode(showBefore)
+        }
+        overlay.isVisible = true
+        overlayMode = OverlayMode.SPREAD
+        suppressSamplingToggle = true
+        cbSampling.isChecked = true
+        suppressSamplingToggle = false
+    }
+
     private fun handleOverlayToggle(isChecked: Boolean) {
         if (!FeatureFlags.S7_OVERLAY && !FeatureFlags.S7_SAMPLING) return
         if (isChecked) {
@@ -561,6 +634,9 @@ class ImportActivity : AppCompatActivity() {
                         showSamplingOverlay(sampling)
                     }
                 }
+                OverlayMode.SPREAD -> {
+                    showSpreadOverlay(cbSpreadBeforeAfter.isChecked, reinit = false)
+                }
                 OverlayMode.NONE -> {
                     val sampling = lastSampling
                     if (sampling == null) {
@@ -574,7 +650,28 @@ class ImportActivity : AppCompatActivity() {
         } else {
             overlay.isVisible = false
             overlay.clearOverlay()
+            overlayMode = OverlayMode.NONE
         }
+    }
+
+    private fun handleSpreadToggle(showBefore: Boolean) {
+        val spread = lastSpread ?: return
+        val before = paletteBeforeSpread
+        val after = spread.colors
+        val paletteToShow = if (showBefore) before else after
+        val violationsSet = if (showBefore) {
+            violationIndices(spread.violationsBefore)
+        } else {
+            violationIndices(spread.violationsAfter)
+        }
+        if (paletteToShow != null) {
+            paletteStrip.setPalette(paletteToShow, violationsSet)
+            suppressPaletteToggle = true
+            cbPalette.isChecked = true
+            suppressPaletteToggle = false
+            paletteStrip.isVisible = true
+        }
+        showSpreadOverlay(showBefore, reinit = false)
     }
 
     private fun startPaletteInit() {
@@ -656,6 +753,7 @@ class ImportActivity : AppCompatActivity() {
         }
         greedyRunning = true
         btnGrowK.isEnabled = false
+        btnSpread2Opt.isEnabled = false
         progress.isVisible = true
         tvStatus.text = "S7.3: рост палитры…"
 
@@ -710,6 +808,7 @@ class ImportActivity : AppCompatActivity() {
                 runOnUiThread {
                     greedyRunning = false
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
+                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
                     progress.isVisible = false
                     lastGreedy = result
                     lastPaletteColors = result.colors
@@ -740,11 +839,139 @@ class ImportActivity : AppCompatActivity() {
                     greedyRunning = false
                     progress.isVisible = false
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
+                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastSpread != null
                     tvStatus.text = "S7.3 ошибка: ${t.message}"
                     Toast.makeText(this, "S7.3 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             } finally {
                 residualBitmap?.recycle()
+            }
+        }.start()
+    }
+
+    private fun startSpread2Opt() {
+        if (!FeatureFlags.S7_SPREAD2OPT) return
+        val sampling = lastSampling
+        val greedy = lastGreedy
+        if (sampling == null || greedy == null) {
+            Toast.makeText(this, "Сначала выполните S7.3", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (spreadRunning) {
+            tvStatus.text = "S7.4: уже выполняется…"
+            return
+        }
+        val seed = (greedy.params["seed"] as? Number)?.toLong() ?: S7SamplingSpec.DEFAULT_SEED
+        val deviceTier = (sampling.params["device_tier"] as? String) ?: S7SamplingSpec.DeviceTier.MID.key
+        spreadRunning = true
+        btnSpread2Opt.isEnabled = false
+        progress.isVisible = true
+        tvStatus.text = "S7.4: запускаем spread 2-opt…"
+
+        Thread {
+            var beforeBitmap: Bitmap? = null
+            var afterBitmap: Bitmap? = null
+            try {
+                val result = S7Spread2Opt.run(
+                    sampling = sampling,
+                    greedy = greedy,
+                    passes = S7Spread2OptSpec.P_PASSES_DEFAULT,
+                    seed = seed,
+                    deviceTier = deviceTier
+                )
+                val colorsBefore = (result.params["colors_before"] as? List<*>)
+                    ?.mapNotNull { it as? S7InitColor }
+                    ?.map { it.copy(okLab = it.okLab.copyOf()) }
+                    ?: greedy.colors.map { it.copy(okLab = it.okLab.copyOf()) }
+                val ambiguity = (result.params["heatmap_ambiguity"] as? FloatArray)?.copyOf()
+                val affected = (result.params["heatmap_affected"] as? FloatArray)?.copyOf()
+
+                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                    try {
+                        S7Spread2OptIo.writeDistMatrixCsv(dir, colorsBefore, "before")
+                        S7Spread2OptIo.writeDistMatrixCsv(dir, result.colors, "after")
+                        S7Spread2OptIo.writeViolationsCsv(dir, result.violationsBefore, "before")
+                        S7Spread2OptIo.writeViolationsCsv(dir, result.violationsAfter, "after")
+                        S7Spread2OptIo.writePairFixesCsv(dir, result.pairFixes)
+                        S7Spread2OptIo.writePaletteStrip(dir, colorsBefore, "before")
+                        S7Spread2OptIo.writePaletteStrip(dir, result.colors, "after")
+                        val overlaySize = ensureOverlaySize()
+                        if (overlaySize != null && ambiguity != null) {
+                            beforeBitmap = createSpreadHeatmapBitmap(overlaySize, sampling, ambiguity, true)
+                            beforeBitmap?.let { bmp ->
+                                S7Spread2OptIo.writeAffectedHeatmap(dir, bmp, "before")
+                            }
+                        }
+                        if (overlaySize != null && affected != null) {
+                            afterBitmap = createSpreadHeatmapBitmap(overlaySize, sampling, affected, false)
+                            afterBitmap?.let { bmp ->
+                                S7Spread2OptIo.writeAffectedHeatmap(dir, bmp, "after")
+                            }
+                        }
+                    } catch (io: Throwable) {
+                        Logger.w("PALETTE", "spread2opt.io.fail", mapOf("error" to (io.message ?: "io")))
+                    }
+                }
+
+                runOnUiThread {
+                    spreadRunning = false
+                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
+                    progress.isVisible = false
+                    lastSpread = result
+                    paletteBeforeSpread = colorsBefore
+                    spreadAmbiguity = ambiguity
+                    spreadAffected = affected
+                    lastPaletteColors = result.colors
+                    val violationsAfterSet = violationIndices(result.violationsAfter)
+                    suppressSpreadToggle = true
+                    cbSpreadBeforeAfter.isChecked = false
+                    suppressSpreadToggle = false
+                    cbSpreadBeforeAfter.isVisible = true
+                    cbSpreadBeforeAfter.isEnabled = true
+                    showSpreadOverlay(showBefore = false, reinit = true)
+                    paletteStrip.setPalette(result.colors, violationsAfterSet)
+                    suppressPaletteToggle = true
+                    cbPalette.isChecked = true
+                    suppressPaletteToggle = false
+                    paletteStrip.isVisible = true
+                    overlayMode = OverlayMode.SPREAD
+                    val accepted = result.pairFixes.count { it.reason == "accepted" }
+                    val rejected = result.pairFixes.count { it.reason != "accepted" }
+                    val clippedMoves = result.pairFixes.sumOf { fix -> fix.moves.count { it.clipped } }
+                    val status = buildString {
+                        append("S7.4: minΔE ")
+                        append(String.format(Locale.US, "%.2f", result.deMinBefore))
+                        append(" → ")
+                        append(String.format(Locale.US, "%.2f", result.deMinAfter))
+                        append(", ΔE95 ")
+                        append(String.format(Locale.US, "%.2f", result.de95Before))
+                        append(" → ")
+                        append(String.format(Locale.US, "%.2f", result.de95After))
+                        append(", GBI ")
+                        append(String.format(Locale.US, "%.3f", result.gbiBefore))
+                        append(" → ")
+                        append(String.format(Locale.US, "%.3f", result.gbiAfter))
+                        append(", принятых ")
+                        append(accepted)
+                        append(", отклонено ")
+                        append(rejected)
+                        append(", clipped ")
+                        append(clippedMoves)
+                    }
+                    tvStatus.text = status
+                }
+            } catch (t: Throwable) {
+                Logger.e("PALETTE", "spread2opt.fail", mapOf("stage" to "S7.4", "error" to (t.message ?: t.toString())), err = t)
+                runOnUiThread {
+                    spreadRunning = false
+                    progress.isVisible = false
+                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
+                    tvStatus.text = "S7.4 ошибка: ${t.message}"
+                    Toast.makeText(this, "S7.4 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                beforeBitmap?.recycle()
+                afterBitmap?.recycle()
             }
         }.start()
     }
@@ -758,6 +985,7 @@ class ImportActivity : AppCompatActivity() {
         cbPalette.isEnabled = true
         cbPalette.isVisible = FeatureFlags.S7_INIT
         paletteStrip.isVisible = true
+        btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastGreedy != null
     }
 
     private fun resetPaletteState() {
@@ -777,6 +1005,17 @@ class ImportActivity : AppCompatActivity() {
         cbPalette.isVisible = FeatureFlags.S7_INIT && lastSampling != null
         btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null && !samplingRunning
         btnGrowK.isEnabled = false
+        lastSpread = null
+        paletteBeforeSpread = null
+        spreadAmbiguity = null
+        spreadAffected = null
+        spreadRunning = false
+        suppressSpreadToggle = true
+        cbSpreadBeforeAfter.isChecked = false
+        suppressSpreadToggle = false
+        cbSpreadBeforeAfter.isEnabled = false
+        cbSpreadBeforeAfter.isVisible = false
+        btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastGreedy != null
     }
 
     private fun formatAnchors(init: S7InitResult): String {
@@ -789,6 +1028,47 @@ class ImportActivity : AppCompatActivity() {
             val value = roi[zone] ?: 0
             "${zone.name.lowercase(Locale.ROOT)}=$value"
         }
+    }
+
+    private fun createSpreadHeatmapBitmap(size: Size, sampling: S7SamplingResult, values: FloatArray, before: Boolean): Bitmap {
+        val bitmap = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(Color.TRANSPARENT)
+        val radius = max(size.width, size.height) / 90f
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val samples = sampling.samples
+        val limit = if (before) values.maxOrNull()?.coerceAtLeast(1e-6f) ?: 1f else 1f
+        val clamp = if (limit <= 0f) 1f else limit
+        for (idx in samples.indices) {
+            if (idx >= values.size) break
+            val value = values[idx]
+            if (value <= 0f) continue
+            val norm = if (before) (value / clamp).coerceIn(0f, 1f) else value.coerceIn(0f, 1f)
+            val alpha = if (before) {
+                (40f + 200f * norm).toInt().coerceIn(0, 255)
+            } else {
+                (70f + 180f * norm).toInt().coerceIn(0, 255)
+            }
+            val color = if (before) {
+                Color.argb(alpha, 255, (120 + 80 * norm).toInt().coerceIn(0, 255), 32)
+            } else {
+                Color.argb(alpha, 64, (160 + 70 * norm).toInt().coerceIn(0, 255), 255)
+            }
+            paint.color = color
+            val sample = samples[idx]
+            canvas.drawCircle(sample.x.toFloat(), sample.y.toFloat(), radius, paint)
+        }
+        return bitmap
+    }
+
+    private fun violationIndices(violations: List<S7SpreadViolation>?): Set<Int>? {
+        if (violations.isNullOrEmpty()) return null
+        val set = mutableSetOf<Int>()
+        for (violation in violations) {
+            set.add(violation.i)
+            set.add(violation.j)
+        }
+        return set
     }
 
     companion object {

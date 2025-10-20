@@ -85,6 +85,7 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var progress: ProgressBar
     private lateinit var fileNameView: TextView
     private lateinit var btnProcess: Button
+    private lateinit var btnLogPalette: Button
     private lateinit var tvStatus: TextView
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
@@ -150,6 +151,7 @@ class ImportActivity : AppCompatActivity() {
         progress = findViewById(R.id.progress)
         fileNameView = findViewById(R.id.tvFileName)
         btnProcess = findViewById(R.id.btnProcess)
+        btnLogPalette = findViewById(R.id.btnLogPalette)
         btnInitK0 = findViewById(R.id.btnInitK0)
         btnGrowK = findViewById(R.id.btnGrowK)
         btnSpread2Opt = findViewById(R.id.btnSpread2Opt)
@@ -253,6 +255,16 @@ class ImportActivity : AppCompatActivity() {
                 Toast.makeText(this, "Сначала выберите изображение", Toast.LENGTH_SHORT).show()
             } else {
                 runPipeline(uri, targetWst = 240)
+            }
+        }
+
+        // Кнопка: вывести компактное резюме палитры в logcat (если уже есть palette_final_k.json)
+        btnLogPalette.setOnClickListener {
+            val ok = PaletteLogProbe.logFinalPaletteFromDiag(this, headN = 8)
+            if (ok) {
+                Toast.makeText(this, "Palette summary → logcat (AiX/PALETTE)", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Palette not found yet (run S7.5/S7.6)", Toast.LENGTH_SHORT).show()
             }
         }
 

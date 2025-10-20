@@ -42,6 +42,10 @@ import com.appforcross.editor.palette.S7Sampler
 import com.appforcross.editor.palette.S7SamplingIo
 import com.appforcross.editor.palette.S7SamplingResult
 import com.appforcross.editor.palette.S7SamplingSpec
+import com.appforcross.editor.palette.S7Kneedle
+import com.appforcross.editor.palette.S7KneedleIo
+import com.appforcross.editor.palette.S7KneedleResult
+import com.appforcross.editor.palette.S7KneedleSpec
 import com.appforcross.editor.palette.S7Spread2Opt
 import com.appforcross.editor.palette.S7Spread2OptIo
 import com.appforcross.editor.palette.S7Spread2OptResult
@@ -56,8 +60,12 @@ import com.handmadeapp.preset.Stage4Runner
 import com.handmadeapp.prescale.PreScaleRunner
 import java.io.File
 import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
@@ -77,9 +85,11 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
     private lateinit var btnSpread2Opt: Button
+    private lateinit var btnFinalizeK: Button
     private lateinit var cbPalette: CheckBox
     private lateinit var paletteStrip: PaletteStripView
     private lateinit var cbSampling: CheckBox
+    private lateinit var cbShowResidual: CheckBox
     private lateinit var cbSpreadBeforeAfter: CheckBox
     private lateinit var overlay: QuantOverlayView
 
@@ -100,6 +110,7 @@ class ImportActivity : AppCompatActivity() {
     private var suppressSamplingToggle = false
     private var suppressPaletteToggle = false
     private var suppressSpreadToggle = false
+    private var suppressResidualToggle = false
     private var residualErrors: FloatArray? = null
     private var residualDeMed: Float = 0f
     private var residualDe95: Float = 0f
@@ -108,6 +119,9 @@ class ImportActivity : AppCompatActivity() {
     private var paletteBeforeSpread: List<S7InitColor>? = null
     private var spreadAmbiguity: FloatArray? = null
     private var spreadAffected: FloatArray? = null
+    private var kneedleRunning = false
+    private var lastKneedle: S7KneedleResult? = null
+    private var indexPreviewBitmap: Bitmap? = null
 
     private enum class OverlayMode { NONE, SAMPLING, RESIDUAL, SPREAD }
 
@@ -126,9 +140,11 @@ class ImportActivity : AppCompatActivity() {
         btnInitK0 = findViewById(R.id.btnInitK0)
         btnGrowK = findViewById(R.id.btnGrowK)
         btnSpread2Opt = findViewById(R.id.btnSpread2Opt)
+        btnFinalizeK = findViewById(R.id.btnFinalizeK)
         tvStatus = findViewById(R.id.tvStatus)
         cbSampling = findViewById(R.id.cbSampling)
         cbPalette = findViewById(R.id.cbPalette)
+        cbShowResidual = findViewById(R.id.cbShowResidual)
         cbSpreadBeforeAfter = findViewById(R.id.cbSpreadBeforeAfter)
         overlay = findViewById(R.id.quantOverlay)
         paletteStrip = findViewById(R.id.paletteStrip)
@@ -144,6 +160,8 @@ class ImportActivity : AppCompatActivity() {
         btnGrowK.isEnabled = false
         btnSpread2Opt.isVisible = FeatureFlags.S7_SPREAD2OPT
         btnSpread2Opt.isEnabled = false
+        btnFinalizeK.isVisible = FeatureFlags.S7_KNEEDLE
+        btnFinalizeK.isEnabled = false
         cbPalette.isVisible = FeatureFlags.S7_INIT
         cbPalette.isEnabled = false
         cbPalette.isChecked = false
@@ -151,6 +169,9 @@ class ImportActivity : AppCompatActivity() {
         cbSpreadBeforeAfter.isVisible = false
         cbSpreadBeforeAfter.isEnabled = false
         cbSpreadBeforeAfter.isChecked = false
+        cbShowResidual.isVisible = false
+        cbShowResidual.isEnabled = false
+        cbShowResidual.isChecked = false
 
         cbSampling.setOnCheckedChangeListener { _, isChecked ->
             if (suppressSamplingToggle) return@setOnCheckedChangeListener
@@ -168,8 +189,17 @@ class ImportActivity : AppCompatActivity() {
             handleSpreadToggle(isChecked)
         }
 
+        cbShowResidual.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressResidualToggle) return@setOnCheckedChangeListener
+            handleResidualToggle(isChecked)
+        }
+
         pickBtn.setOnClickListener {
             openImagePicker()
+        }
+
+        btnFinalizeK.setOnClickListener {
+            startFinalizeK()
         }
 
         // Центр — отсутствие изменений
@@ -320,6 +350,7 @@ class ImportActivity : AppCompatActivity() {
 
     /** Реал-тайм предпросмотр с ColorMatrix (без пересборки битмапа). */
     private fun applyAdjustments() {
+        if (indexPreviewBitmap != null) return
         val bmp = baseBitmap ?: return
         val b = (sbBrightness.progress - 100) / 100f   // [-1..+1]
         val c = (sbContrast.progress) / 100f           // [0..2], 1 — без изм.
@@ -427,6 +458,10 @@ class ImportActivity : AppCompatActivity() {
         samplingRunning = false
         initRunning = false
         greedyRunning = false
+        kneedleRunning = false
+        lastKneedle = null
+        indexPreviewBitmap?.recycle()
+        indexPreviewBitmap = null
         suppressSpreadToggle = true
         cbSpreadBeforeAfter.isChecked = false
         suppressSpreadToggle = false
@@ -441,6 +476,12 @@ class ImportActivity : AppCompatActivity() {
         overlay.isVisible = false
         overlay.clearOverlay()
         btnSpread2Opt.isEnabled = false
+        suppressResidualToggle = true
+        cbShowResidual.isChecked = false
+        suppressResidualToggle = false
+        cbShowResidual.isEnabled = false
+        cbShowResidual.isVisible = false
+        btnFinalizeK.isEnabled = false
         resetPaletteState()
     }
 
@@ -603,6 +644,9 @@ class ImportActivity : AppCompatActivity() {
         }
         overlay.isVisible = true
         overlayMode = OverlayMode.SPREAD
+        suppressResidualToggle = true
+        cbShowResidual.isChecked = false
+        suppressResidualToggle = false
         suppressSamplingToggle = true
         cbSampling.isChecked = true
         suppressSamplingToggle = false
@@ -611,33 +655,14 @@ class ImportActivity : AppCompatActivity() {
     private fun handleOverlayToggle(isChecked: Boolean) {
         if (!FeatureFlags.S7_OVERLAY && !FeatureFlags.S7_SAMPLING) return
         if (isChecked) {
-            when (overlayMode) {
-                OverlayMode.RESIDUAL -> {
-                    if (residualErrors != null) {
-                        showResidualOverlay()
-                    } else {
-                        val sampling = lastSampling
-                        if (sampling == null) {
-                            overlayPending = true
-                            startSamplingInBackground(showOverlayWhenDone = true)
-                        } else {
-                            showSamplingOverlay(sampling)
-                        }
-                    }
+            when {
+                cbShowResidual.isChecked && residualErrors != null -> {
+                    showResidualOverlay()
                 }
-                OverlayMode.SAMPLING -> {
-                    val sampling = lastSampling
-                    if (sampling == null) {
-                        overlayPending = true
-                        startSamplingInBackground(showOverlayWhenDone = true)
-                    } else {
-                        showSamplingOverlay(sampling)
-                    }
-                }
-                OverlayMode.SPREAD -> {
+                overlayMode == OverlayMode.SPREAD -> {
                     showSpreadOverlay(cbSpreadBeforeAfter.isChecked, reinit = false)
                 }
-                OverlayMode.NONE -> {
+                else -> {
                     val sampling = lastSampling
                     if (sampling == null) {
                         overlayPending = true
@@ -651,6 +676,36 @@ class ImportActivity : AppCompatActivity() {
             overlay.isVisible = false
             overlay.clearOverlay()
             overlayMode = OverlayMode.NONE
+        }
+    }
+
+    private fun handleResidualToggle(isChecked: Boolean) {
+        if (isChecked) {
+            if (residualErrors == null) {
+                suppressResidualToggle = true
+                cbShowResidual.isChecked = false
+                suppressResidualToggle = false
+                Toast.makeText(this, "Нет данных residual", Toast.LENGTH_SHORT).show()
+                return
+            }
+            suppressSamplingToggle = true
+            cbSampling.isChecked = true
+            suppressSamplingToggle = false
+            showResidualOverlay()
+        } else {
+            if (overlayMode == OverlayMode.RESIDUAL) {
+                val sampling = lastSampling
+                if (cbSampling.isChecked && sampling != null) {
+                    showSamplingOverlay(sampling)
+                } else {
+                    overlay.isVisible = false
+                    overlay.clearOverlay()
+                    overlayMode = OverlayMode.NONE
+                    suppressSamplingToggle = true
+                    cbSampling.isChecked = false
+                    suppressSamplingToggle = false
+                }
+            }
         }
     }
 
@@ -816,7 +871,11 @@ class ImportActivity : AppCompatActivity() {
                         residualErrors = errorsForUi
                         residualDeMed = result.residual.deMed
                         residualDe95 = result.residual.de95
-                        overlayMode = OverlayMode.RESIDUAL
+                        cbShowResidual.isVisible = true
+                        cbShowResidual.isEnabled = true
+                        suppressResidualToggle = true
+                        cbShowResidual.isChecked = true
+                        suppressResidualToggle = false
                         suppressSamplingToggle = true
                         cbSampling.isChecked = true
                         suppressSamplingToggle = false
@@ -825,6 +884,11 @@ class ImportActivity : AppCompatActivity() {
                         residualErrors = null
                         residualDeMed = 0f
                         residualDe95 = 0f
+                        suppressResidualToggle = true
+                        cbShowResidual.isChecked = false
+                        suppressResidualToggle = false
+                        cbShowResidual.isEnabled = false
+                        cbShowResidual.isVisible = false
                         overlayMode = OverlayMode.NONE
                         overlay.isVisible = false
                     }
@@ -917,6 +981,8 @@ class ImportActivity : AppCompatActivity() {
                     spreadRunning = false
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
                     progress.isVisible = false
+                    btnFinalizeK.isVisible = FeatureFlags.S7_KNEEDLE
+                    btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
                     lastSpread = result
                     paletteBeforeSpread = colorsBefore
                     spreadAmbiguity = ambiguity
@@ -976,6 +1042,168 @@ class ImportActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun startFinalizeK() {
+        if (!FeatureFlags.S7_KNEEDLE) return
+        val sampling = lastSampling
+        val spread = lastSpread
+        val init = lastInit
+        if (sampling == null || spread == null || init == null) {
+            Toast.makeText(this, "Сначала выполните S7.4", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (kneedleRunning) {
+            tvStatus.text = "S7.5: уже выполняется…"
+            return
+        }
+        val palette = spread.colors
+        if (palette.isEmpty()) {
+            Toast.makeText(this, "Палитра пуста", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val k0 = init.colors.size
+        val kTry = palette.size
+        kneedleRunning = true
+        btnFinalizeK.isEnabled = false
+        progress.isVisible = true
+        tvStatus.text = "S7.5: подбор K*…"
+        val seed = (spread.params["seed"] as? Number)?.toLong()
+            ?: (lastGreedy?.params?.get("seed") as? Number)?.toLong()
+            ?: S7SamplingSpec.DEFAULT_SEED
+        Thread {
+            var residualBitmap: Bitmap? = null
+            var indexPreview: Bitmap? = null
+            try {
+                val result = S7Kneedle.run(sampling, palette, k0, kTry, seed)
+                val row = result.rows.firstOrNull { it.k == result.Kstar }
+                val errors = (result.params["errors_kstar"] as? FloatArray)?.copyOf()
+                val overlaySize = ensureOverlaySize()
+                if (overlaySize != null && errors != null) {
+                    residualBitmap = S7OverlayRenderer.createResidualBitmap(
+                        overlaySize.width,
+                        overlaySize.height,
+                        sampling,
+                        errors,
+                        row?.deMed ?: 0f,
+                        row?.de95 ?: 0f
+                    )
+                }
+                val base = baseBitmap
+                val finalPalette = palette.take(result.Kstar)
+                if (base != null) {
+                    indexPreview = createIndexPreviewBitmap(base, finalPalette)
+                }
+                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                    try {
+                        S7KneedleIo.writeGainCsv(dir, result.rows)
+                        S7KneedleIo.writeKneedlePng(dir, result.rows, result.Kstar)
+                        S7KneedleIo.writeFinalPalette(dir, finalPalette, result.Kstar)
+                        residualBitmap?.let { bmp ->
+                            S7KneedleIo.writeResidualHeatmap(dir, bmp, result.Kstar)
+                        }
+                        indexPreview?.let { bmp ->
+                            S7KneedleIo.writeIndexPreview(dir, bmp, result.Kstar)
+                        }
+                    } catch (io: Throwable) {
+                        Logger.w("PALETTE", "kneedle.io.fail", mapOf("error" to (io.message ?: "io")))
+                    }
+                }
+                val errorsForUi = errors
+                runOnUiThread {
+                    kneedleRunning = false
+                    btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
+                    progress.isVisible = false
+                    lastKneedle = result
+                    val previousPreview = indexPreviewBitmap
+                    indexPreviewBitmap = indexPreview
+                    updatePalettePreview(finalPalette)
+                    if (errorsForUi != null) {
+                        residualErrors = errorsForUi
+                        residualDeMed = row?.deMed ?: 0f
+                        residualDe95 = row?.de95 ?: 0f
+                        cbShowResidual.isVisible = true
+                        cbShowResidual.isEnabled = true
+                        suppressResidualToggle = true
+                        cbShowResidual.isChecked = true
+                        suppressResidualToggle = false
+                        suppressSamplingToggle = true
+                        cbSampling.isChecked = true
+                        suppressSamplingToggle = false
+                        showResidualOverlay()
+                    } else {
+                        residualErrors = null
+                        residualDeMed = 0f
+                        residualDe95 = 0f
+                        suppressResidualToggle = true
+                        cbShowResidual.isChecked = false
+                        suppressResidualToggle = false
+                        cbShowResidual.isEnabled = false
+                        cbShowResidual.isVisible = false
+                        overlay.isVisible = false
+                        overlay.clearOverlay()
+                        overlayMode = OverlayMode.NONE
+                        suppressSamplingToggle = true
+                        cbSampling.isChecked = false
+                        suppressSamplingToggle = false
+                    }
+                    indexPreview?.let {
+                        image.colorFilter = null
+                        image.setImageBitmap(it)
+                    }
+                    if (previousPreview != null && previousPreview !== indexPreview) {
+                        previousPreview.recycle()
+                    }
+                    val dMax = (result.params["Dmax"] as? Number)?.toFloat() ?: 0f
+                    val status = buildString {
+                        append("S7.5: K*=")
+                        append(result.Kstar)
+                        append(", причина: ")
+                        append(result.reason)
+                        append("; ΔE95(K*)=")
+                        append(String.format(Locale.US, "%.2f", row?.de95 ?: 0f))
+                        append(", GBI(K*)=")
+                        append(String.format(Locale.US, "%.3f", row?.gbi ?: 0f))
+                        append(", TC=")
+                        append(String.format(Locale.US, "%.3f", row?.tc ?: 0f))
+                        append(", ISL=")
+                        append(String.format(Locale.US, "%.3f", row?.isl ?: 0f))
+                        append("; F-D: Dmax=")
+                        append(String.format(Locale.US, "%.3f", dMax))
+                        append(", τ_knee=")
+                        append(String.format(Locale.US, "%.2f", S7KneedleSpec.tau_knee))
+                        append(", τ_gain=")
+                        append(String.format(Locale.US, "%.2f", S7KneedleSpec.tau_gain))
+                    }
+                    tvStatus.text = status
+                    Logger.i(
+                        "PALETTE",
+                        "overlay.kstar.ready",
+                        mapOf(
+                            "Kstar" to result.Kstar,
+                            "residual_ready" to (errorsForUi != null),
+                            "index_preview" to (indexPreview != null)
+                        )
+                    )
+                }
+            } catch (t: Throwable) {
+                Logger.e(
+                    "PALETTE",
+                    "kneedle.ui.fail",
+                    mapOf("error" to (t.message ?: t.toString())),
+                    err = t
+                )
+                runOnUiThread {
+                    kneedleRunning = false
+                    btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
+                    progress.isVisible = false
+                    tvStatus.text = "S7.5 ошибка: ${t.message}"
+                    Toast.makeText(this, "S7.5 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                residualBitmap?.recycle()
+            }
+        }.start()
+    }
+
     private fun updatePalettePreview(colors: List<S7InitColor>) {
         lastPaletteColors = colors
         paletteStrip.setPalette(colors)
@@ -1016,6 +1244,14 @@ class ImportActivity : AppCompatActivity() {
         cbSpreadBeforeAfter.isEnabled = false
         cbSpreadBeforeAfter.isVisible = false
         btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastGreedy != null
+        btnFinalizeK.isEnabled = false
+        btnFinalizeK.isVisible = FeatureFlags.S7_KNEEDLE && lastSpread != null
+        suppressResidualToggle = true
+        cbShowResidual.isChecked = false
+        suppressResidualToggle = false
+        cbShowResidual.isEnabled = false
+        cbShowResidual.isVisible = false
+        lastKneedle = null
     }
 
     private fun formatAnchors(init: S7InitResult): String {
@@ -1060,6 +1296,134 @@ class ImportActivity : AppCompatActivity() {
         }
         return bitmap
     }
+
+    private fun createIndexPreviewBitmap(src: Bitmap, palette: List<S7InitColor>): Bitmap? {
+        if (palette.isEmpty()) return null
+        val width = src.width
+        val height = src.height
+        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val row = IntArray(width)
+        val labs = palette.map { it.okLab }
+        val colors = palette.map { it.sRGB }
+        for (y in 0 until height) {
+            src.getPixels(row, 0, width, 0, y, width, 1)
+            for (x in 0 until width) {
+                val lab = argbToOklab(row[x])
+                var bestIdx = 0
+                var bestDist = Float.POSITIVE_INFINITY
+                for (i in labs.indices) {
+                    val d = deltaE(lab, labs[i])
+                    if (d < bestDist) {
+                        bestDist = d
+                        bestIdx = i
+                    }
+                }
+                row[x] = colors[bestIdx]
+            }
+            out.setPixels(row, 0, width, 0, y, width, 1)
+        }
+        return out
+    }
+
+    private fun argbToOklab(color: Int): FloatArray {
+        val r = srgbToLinear(Color.red(color) / 255f)
+        val g = srgbToLinear(Color.green(color) / 255f)
+        val b = srgbToLinear(Color.blue(color) / 255f)
+        val l = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b
+        val m = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b
+        val s = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b
+        val lRoot = cbrt(l)
+        val mRoot = cbrt(m)
+        val sRoot = cbrt(s)
+        val L = 0.2104542553f * lRoot + 0.7936177850f * mRoot - 0.0040720468f * sRoot
+        val A = 1.9779984951f * lRoot - 2.4285922050f * mRoot + 0.4505937099f * sRoot
+        val B = 0.0259040371f * lRoot + 0.7827717662f * mRoot - 0.8086757660f * sRoot
+        return floatArrayOf(L, A, B)
+    }
+
+    private fun srgbToLinear(value: Float): Float {
+        return if (value <= 0.04045f) {
+            value / 12.92f
+        } else {
+            ((value + 0.055f) / 1.055f).pow(2.4f)
+        }
+    }
+
+    private fun cbrt(value: Float): Float {
+        return if (value <= 0f) 0f else kotlin.math.cbrt(value.toDouble()).toFloat()
+    }
+
+    private fun deltaE(lab1: FloatArray, lab2: FloatArray): Float {
+        return deltaE(lab1[0], lab1[1], lab1[2], lab2[0], lab2[1], lab2[2])
+    }
+
+    private fun deltaE(L1: Float, a1: Float, b1: Float, L2: Float, a2: Float, b2: Float): Float {
+        val L1d = L1.toDouble()
+        val a1d = a1.toDouble()
+        val b1d = b1.toDouble()
+        val L2d = L2.toDouble()
+        val a2d = a2.toDouble()
+        val b2d = b2.toDouble()
+        val avgL = (L1d + L2d) * 0.5
+        val c1 = sqrt(a1d * a1d + b1d * b1d)
+        val c2 = sqrt(a2d * a2d + b2d * b2d)
+        val avgC = (c1 + c2) * 0.5
+        val g = 0.5 * (1.0 - sqrt(avgC.pow(7.0) / (avgC.pow(7.0) + 25.0.pow(7.0))))
+        val a1p = a1d * (1.0 + g)
+        val a2p = a2d * (1.0 + g)
+        val c1p = sqrt(a1p * a1p + b1d * b1d)
+        val c2p = sqrt(a2p * a2p + b2d * b2d)
+        val avgCp = (c1p + c2p) * 0.5
+        val h1p = hueAngleDouble(b1d, a1p)
+        val h2p = hueAngleDouble(b2d, a2p)
+        val deltaHp = 2.0 * sqrt(c1p * c2p) * sin((hueDeltaDouble(c1p, c2p, h1p, h2p)) / 2.0)
+        val deltaLp = L2d - L1d
+        val deltaCp = c2p - c1p
+        val avgHp = meanHueDouble(h1p, h2p, c1p, c2p)
+        val t = 1.0 - 0.17 * cos(avgHp - degToRadDouble(30.0)) + 0.24 * cos(2.0 * avgHp) +
+            0.32 * cos(3.0 * avgHp + degToRadDouble(6.0)) - 0.20 * cos(4.0 * avgHp - degToRadDouble(63.0))
+        val sl = 1.0 + (0.015 * (avgL - 50.0).pow(2.0)) / sqrt(20.0 + (avgL - 50.0).pow(2.0))
+        val sc = 1.0 + 0.045 * avgCp
+        val sh = 1.0 + 0.015 * avgCp * t
+        val deltaTheta = degToRadDouble(30.0) * exp(-((avgHp - degToRadDouble(275.0)) / degToRadDouble(25.0)).pow(2.0))
+        val rc = 2.0 * sqrt(avgCp.pow(7.0) / (avgCp.pow(7.0) + 25.0.pow(7.0)))
+        val rt = -sin(2.0 * deltaTheta) * rc
+        val termL = deltaLp / sl
+        val termC = deltaCp / sc
+        val termH = deltaHp / sh
+        val deltaE = sqrt(termL * termL + termC * termC + termH * termH + rt * termC * termH)
+        return deltaE.toFloat()
+    }
+
+    private fun hueAngleDouble(b: Double, ap: Double): Double {
+        if (ap == 0.0 && b == 0.0) return 0.0
+        var angle = kotlin.math.atan2(b, ap)
+        if (angle < 0) angle += 2.0 * Math.PI
+        return angle
+    }
+
+    private fun hueDeltaDouble(c1p: Double, c2p: Double, h1p: Double, h2p: Double): Double {
+        if (c1p * c2p == 0.0) return 0.0
+        val diff = h2p - h1p
+        return when {
+            kotlin.math.abs(diff) <= Math.PI -> diff
+            diff > Math.PI -> diff - 2.0 * Math.PI
+            diff < -Math.PI -> diff + 2.0 * Math.PI
+            else -> diff
+        }
+    }
+
+    private fun meanHueDouble(h1p: Double, h2p: Double, c1p: Double, c2p: Double): Double {
+        if (c1p * c2p == 0.0) return h1p + h2p
+        val diff = kotlin.math.abs(h1p - h2p)
+        return when {
+            diff <= Math.PI -> (h1p + h2p) * 0.5
+            (h1p + h2p) < 2.0 * Math.PI -> (h1p + h2p + 2.0 * Math.PI) * 0.5
+            else -> (h1p + h2p - 2.0 * Math.PI) * 0.5
+        }
+    }
+
+    private fun degToRadDouble(value: Double): Double = value * Math.PI / 180.0
 
     private fun violationIndices(violations: List<S7SpreadViolation>?): Set<Int>? {
         if (violations.isNullOrEmpty()) return null

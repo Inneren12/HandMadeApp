@@ -45,6 +45,13 @@
             android:layout_marginStart="8dp"
             android:text="Spread 2-opt" />
 
+        <Button
+            android:id="@+id/btnFinalizeK"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Finalize K (S7.5)" />
+
         <CheckBox
             android:id="@+id/cbSampling"
             android:layout_width="wrap_content"
@@ -58,6 +65,13 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:text="Палитра K₀" />
+
+        <CheckBox
+            android:id="@+id/cbShowResidual"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Residual" />
 
         <CheckBox
             android:id="@+id/cbSpreadBeforeAfter"

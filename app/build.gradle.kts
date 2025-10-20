@@ -8,7 +8,7 @@ plugins {
 }
 android {
     namespace = "com.handmadeapp"
-    compileSdk = 35
+    compileSdk = 36
 
     testOptions {
        unitTests.isIncludeAndroidResources = true

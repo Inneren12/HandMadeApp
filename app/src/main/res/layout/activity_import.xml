@@ -4,120 +4,128 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- Верхняя панель -->
-    <LinearLayout
+    <!-- Верхняя панель (прокручиваемая по горизонтали, чтобы все кнопки были доступны) -->
+    <HorizontalScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="12dp"
-        android:orientation="horizontal">
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        android:scrollbars="none">
 
-        <Button
-            android:id="@+id/btnPick"
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Выбрать изображение" />
+            android:padding="12dp"
+            android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/btnProcess"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:text="Сделать паттерн" />
+            <Button
+                android:id="@+id/btnPick"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Выбрать изображение" />
 
-        <Button
-            android:id="@+id/btnInitK0"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Init K₀" />
+            <Button
+                android:id="@+id/btnProcess"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="Сделать паттерн" />
 
-        <Button
-            android:id="@+id/btnGrowK"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Grow S7.3" />
+            <Button
+                android:id="@+id/btnInitK0"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Init K₀" />
 
-        <Button
-            android:id="@+id/btnSpread2Opt"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Spread 2-opt" />
+            <Button
+                android:id="@+id/btnGrowK"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Grow S7.3" />
 
-        <Button
-            android:id="@+id/btnFinalizeK"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Finalize K (S7.5)" />
+            <Button
+                android:id="@+id/btnSpread2Opt"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Spread 2-opt" />
 
-        <Button
-            android:id="@+id/btnIndexK"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Index (S7.6)" />
+            <Button
+                android:id="@+id/btnFinalizeK"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Finalize K (S7.5)" />
 
-        <Button
-            android:id="@+id/btnLogPalette"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Log Palette" />
+            <Button
+                android:id="@+id/btnIndexK"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Index (S7.6)" />
 
-        <CheckBox
-            android:id="@+id/cbSampling"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:text="Sampling (S7.1)" />
+            <Button
+                android:id="@+id/btnLogPalette"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Log Palette" />
 
-        <CheckBox
-            android:id="@+id/cbPalette"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Палитра K₀" />
+            <CheckBox
+                android:id="@+id/cbSampling"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="Sampling (S7.1)" />
 
-        <CheckBox
-            android:id="@+id/cbShowResidual"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Residual" />
+            <CheckBox
+                android:id="@+id/cbPalette"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Палитра K₀" />
 
-        <CheckBox
-            android:id="@+id/cbSpreadBeforeAfter"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="S7.4 До" />
+            <CheckBox
+                android:id="@+id/cbShowResidual"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Residual" />
 
-        <CheckBox
-            android:id="@+id/cbIndexGrid"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Index grid" />
+            <CheckBox
+                android:id="@+id/cbSpreadBeforeAfter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="S7.4 До" />
 
-        <CheckBox
-            android:id="@+id/cbIndexCost"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Cost heatmap" />
+            <CheckBox
+                android:id="@+id/cbIndexGrid"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Index grid" />
 
-        <TextView
-            android:id="@+id/tvFileName"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:layout_weight="1"
-            android:maxLines="1"
-            android:ellipsize="end"
-            android:text=""/>
-    </LinearLayout>
+            <CheckBox
+                android:id="@+id/cbIndexCost"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Cost heatmap" />
+
+            <TextView
+                android:id="@+id/tvFileName"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:text=""/>
+        </LinearLayout>
+    </HorizontalScrollView>
 
     <!-- Предпросмотр -->
     <FrameLayout

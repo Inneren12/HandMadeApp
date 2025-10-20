@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
+import kotlin.jvm.Volatile
 
 /**
  * Ноу-оп заглушки для отрисовок S7-оверлеев, чтобы сборка не падала,
@@ -18,10 +19,17 @@ import android.graphics.RectF
  * Позже можно заменить на реальные реализации.
  */
 object S7OverlayRenderer {
+    @Volatile
+    private var overlaysEnabled: Boolean = true
+
+    @JvmStatic
+    fun setEnabled(enabled: Boolean) {
+        overlaysEnabled = enabled
+    }
 
     @JvmStatic
     fun drawSamplingOverlay(canvas: Canvas?, bitmap: Bitmap?, alpha: Float = 0.45f) {
-        if (canvas == null || bitmap == null) return
+        if (!overlaysEnabled || canvas == null || bitmap == null) return
         val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.alpha = (alpha * 255).toInt() }
         val dst = RectF(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
         canvas.drawBitmap(bitmap, null, dst, p)
@@ -29,7 +37,7 @@ object S7OverlayRenderer {
 
     @JvmStatic
     fun drawResidualHeatmap(canvas: Canvas?, heatmap: Bitmap?, alpha: Float = 0.6f) {
-        if (canvas == null || heatmap == null) return
+        if (!overlaysEnabled || canvas == null || heatmap == null) return
         val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.alpha = (alpha * 255).toInt() }
         val dst = RectF(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
         canvas.drawBitmap(heatmap, null, dst, p)
@@ -37,7 +45,7 @@ object S7OverlayRenderer {
 
     @JvmStatic
     fun drawIndexPreview(canvas: Canvas?, preview: Bitmap?) {
-        if (canvas == null || preview == null) return
+        if (!overlaysEnabled || canvas == null || preview == null) return
         val dst = RectF(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
         canvas.drawBitmap(preview, null, dst, null)
     }
@@ -51,7 +59,7 @@ object S7OverlayRenderer {
         alpha: Float = 0.45f
     ) {
         val bmp = if (showAfter) after else before
-        if (canvas == null || bmp == null) return
+        if (!overlaysEnabled || canvas == null || bmp == null) return
         val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.alpha = (alpha * 255).toInt() }
         val dst = RectF(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
         canvas.drawBitmap(bmp, null, dst, p)

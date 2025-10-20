@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Log
 import android.util.Size
+import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.ImageView
@@ -87,6 +88,8 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var btnProcess: Button
     private lateinit var btnLogPalette: Button
     private lateinit var tvStatus: TextView
+    // Debounce для плавной перекраски предпросмотра
+    private val adjustDebouncer = Debouncer(90)
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
     private lateinit var btnSpread2Opt: Button
@@ -237,7 +240,10 @@ class ImportActivity : AppCompatActivity() {
         sbSaturation.progress = 100
 
         val listener = object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) = applyAdjustments()
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                // Откладываем применение на 90мс, чтобы не перерисовывать на каждый тик
+                adjustDebouncer.submit { applyAdjustments() }
+            }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         }
@@ -297,6 +303,18 @@ class ImportActivity : AppCompatActivity() {
         updateIndexUiState()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Включаем отрисовку S7-оверлеев, когда активити видима
+        S7OverlayRenderer.setEnabled(true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Во время скрытия активити не перерисовываем S7-оверлеи → меньше лагов/GC
+        S7OverlayRenderer.setEnabled(false)
+    }
+
     private fun openImagePicker() {
         // ACTION_OPEN_DOCUMENT позволяет работать с SAF и не требует дополнительных разрешений
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -317,6 +335,8 @@ class ImportActivity : AppCompatActivity() {
     private fun onImageChosen(uri: Uri) {
         progress.isVisible = true
         image.setImageDrawable(ColorDrawable(0xFF222222.toInt()))
+        // Хардварный слой уменьшает лаги при применении ColorMatrix
+        image.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         fileNameView.text = queryDisplayName(uri) ?: "Выбран файл"
         tvStatus.text = "Загружаем превью…"
         currentUri = uri

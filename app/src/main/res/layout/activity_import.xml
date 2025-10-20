@@ -31,6 +31,13 @@
             android:layout_marginStart="8dp"
             android:text="Init K₀" />
 
+        <Button
+            android:id="@+id/btnGrowK"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Grow S7.3" />
+
         <CheckBox
             android:id="@+id/cbSampling"
             android:layout_width="wrap_content"

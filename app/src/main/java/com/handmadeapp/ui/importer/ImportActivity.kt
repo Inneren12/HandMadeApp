@@ -26,6 +26,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.config.FeatureFlags
+import com.appforcross.editor.palette.S7Greedy
+import com.appforcross.editor.palette.S7GreedyIo
+import com.appforcross.editor.palette.S7GreedyResult
+import com.appforcross.editor.palette.S7GreedySpec
+import com.appforcross.editor.palette.S7InitColor
 import com.appforcross.editor.palette.S7InitResult
 import com.appforcross.editor.palette.S7InitSpec
 import com.appforcross.editor.palette.S7Initializer
@@ -44,6 +49,7 @@ import com.handmadeapp.prescale.PreScaleRunner
 import java.io.File
 import java.util.Locale
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
@@ -61,6 +67,7 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var btnProcess: Button
     private lateinit var tvStatus: TextView
     private lateinit var btnInitK0: Button
+    private lateinit var btnGrowK: Button
     private lateinit var cbPalette: CheckBox
     private lateinit var paletteStrip: PaletteStripView
     private lateinit var cbSampling: CheckBox
@@ -70,14 +77,23 @@ class ImportActivity : AppCompatActivity() {
     private var currentUri: Uri? = null
     private var lastSampling: S7SamplingResult? = null
     private var lastInit: S7InitResult? = null
+    private var lastPaletteColors: List<S7InitColor>? = null
+    private var lastGreedy: S7GreedyResult? = null
     private var overlayImageSize: Size? = null
     private var cachedMasks: Masks? = null
     private var cachedMasksSize: Size? = null
     private var samplingRunning = false
     private var overlayPending = false
     private var initRunning = false
+    private var greedyRunning = false
     private var suppressSamplingToggle = false
     private var suppressPaletteToggle = false
+    private var residualErrors: FloatArray? = null
+    private var residualDeMed: Float = 0f
+    private var residualDe95: Float = 0f
+    private var overlayMode: OverlayMode = OverlayMode.NONE
+
+    private enum class OverlayMode { NONE, SAMPLING, RESIDUAL }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -92,6 +108,7 @@ class ImportActivity : AppCompatActivity() {
         fileNameView = findViewById(R.id.tvFileName)
         btnProcess = findViewById(R.id.btnProcess)
         btnInitK0 = findViewById(R.id.btnInitK0)
+        btnGrowK = findViewById(R.id.btnGrowK)
         tvStatus = findViewById(R.id.tvStatus)
         cbSampling = findViewById(R.id.cbSampling)
         cbPalette = findViewById(R.id.cbPalette)
@@ -105,6 +122,8 @@ class ImportActivity : AppCompatActivity() {
         cbSampling.isVisible = FeatureFlags.S7_SAMPLING || FeatureFlags.S7_OVERLAY
         btnInitK0.isVisible = FeatureFlags.S7_INIT
         btnInitK0.isEnabled = false
+        btnGrowK.isVisible = FeatureFlags.S7_GREEDY
+        btnGrowK.isEnabled = false
         cbPalette.isVisible = FeatureFlags.S7_INIT
         cbPalette.isEnabled = false
         cbPalette.isChecked = false
@@ -112,29 +131,13 @@ class ImportActivity : AppCompatActivity() {
 
         cbSampling.setOnCheckedChangeListener { _, isChecked ->
             if (suppressSamplingToggle) return@setOnCheckedChangeListener
-            if (!FeatureFlags.S7_OVERLAY && !FeatureFlags.S7_SAMPLING) {
-                return@setOnCheckedChangeListener
-            }
-            if (isChecked) {
-                val result = lastSampling
-                if (result == null) {
-                    overlayPending = true
-                    startSamplingInBackground(showOverlayWhenDone = true)
-                } else {
-                    showOverlay(result)
-                }
-            } else {
-                overlay.isVisible = false
-                overlayImageSize?.let {
-                    overlay.setData(it, null, heat = false, points = false)
-                }
-            }
+            handleOverlayToggle(isChecked)
         }
 
         cbPalette.setOnCheckedChangeListener { _, isChecked ->
             if (suppressPaletteToggle) return@setOnCheckedChangeListener
             if (!FeatureFlags.S7_INIT) return@setOnCheckedChangeListener
-            paletteStrip.isVisible = isChecked && lastInit != null
+            paletteStrip.isVisible = isChecked && lastPaletteColors != null
         }
 
         pickBtn.setOnClickListener {
@@ -173,6 +176,10 @@ class ImportActivity : AppCompatActivity() {
 
         btnInitK0.setOnClickListener {
             startPaletteInit()
+        }
+
+        btnGrowK.setOnClickListener {
+            startPaletteGrowth()
         }
     }
 
@@ -375,9 +382,14 @@ class ImportActivity : AppCompatActivity() {
     private fun resetSamplingState() {
         lastSampling = null
         lastInit = null
+        lastPaletteColors = null
+        lastGreedy = null
+        residualErrors = null
+        overlayMode = OverlayMode.NONE
         overlayPending = false
         samplingRunning = false
         initRunning = false
+        greedyRunning = false
         cachedMasks = null
         cachedMasksSize = null
         overlayImageSize = null
@@ -385,6 +397,7 @@ class ImportActivity : AppCompatActivity() {
         cbSampling.isChecked = false
         suppressSamplingToggle = false
         overlay.isVisible = false
+        overlay.clearOverlay()
         resetPaletteState()
     }
 
@@ -441,7 +454,7 @@ class ImportActivity : AppCompatActivity() {
                         suppressSamplingToggle = true
                         cbSampling.isChecked = true
                         suppressSamplingToggle = false
-                        showOverlay(sampling)
+                        showSamplingOverlay(sampling)
                     } else {
                         overlay.isVisible = false
                     }
@@ -493,14 +506,75 @@ class ImportActivity : AppCompatActivity() {
         )
     }
 
-    private fun showOverlay(result: S7SamplingResult) {
-        val size = overlayImageSize ?: baseBitmap?.let { Size(it.width, it.height).also { s -> overlayImageSize = s } }
+    private fun ensureOverlaySize(): Size? {
+        val cached = overlayImageSize
+        if (cached != null) return cached
+        val bmp = baseBitmap ?: return null
+        val size = Size(bmp.width, bmp.height)
+        overlayImageSize = size
+        return size
+    }
+
+    private fun showSamplingOverlay(result: S7SamplingResult) {
+        val size = ensureOverlaySize()
         if (size == null) {
             overlay.isVisible = false
             return
         }
-        overlay.setData(size, result, heat = true, points = true)
+        overlay.setSamplingData(size, result, heat = true, points = true)
         overlay.isVisible = true
+        overlayMode = OverlayMode.SAMPLING
+    }
+
+    private fun showResidualOverlay() {
+        val size = ensureOverlaySize() ?: return
+        val sampling = lastSampling ?: return
+        val errors = residualErrors ?: return
+        overlay.setResidualData(size, sampling, errors, residualDeMed, residualDe95)
+        overlay.isVisible = true
+        overlayMode = OverlayMode.RESIDUAL
+    }
+
+    private fun handleOverlayToggle(isChecked: Boolean) {
+        if (!FeatureFlags.S7_OVERLAY && !FeatureFlags.S7_SAMPLING) return
+        if (isChecked) {
+            when (overlayMode) {
+                OverlayMode.RESIDUAL -> {
+                    if (residualErrors != null) {
+                        showResidualOverlay()
+                    } else {
+                        val sampling = lastSampling
+                        if (sampling == null) {
+                            overlayPending = true
+                            startSamplingInBackground(showOverlayWhenDone = true)
+                        } else {
+                            showSamplingOverlay(sampling)
+                        }
+                    }
+                }
+                OverlayMode.SAMPLING -> {
+                    val sampling = lastSampling
+                    if (sampling == null) {
+                        overlayPending = true
+                        startSamplingInBackground(showOverlayWhenDone = true)
+                    } else {
+                        showSamplingOverlay(sampling)
+                    }
+                }
+                OverlayMode.NONE -> {
+                    val sampling = lastSampling
+                    if (sampling == null) {
+                        overlayPending = true
+                        startSamplingInBackground(showOverlayWhenDone = true)
+                    } else {
+                        showSamplingOverlay(sampling)
+                    }
+                }
+            }
+        } else {
+            overlay.isVisible = false
+            overlay.clearOverlay()
+        }
     }
 
     private fun startPaletteInit() {
@@ -517,6 +591,7 @@ class ImportActivity : AppCompatActivity() {
         initRunning = true
         btnInitK0.isEnabled = false
         cbPalette.isEnabled = false
+        btnGrowK.isEnabled = false
         progress.isVisible = true
         tvStatus.text = "S7.2: инициализация палитры…"
 
@@ -537,9 +612,13 @@ class ImportActivity : AppCompatActivity() {
                 runOnUiThread {
                     initRunning = false
                     lastInit = result
+                    lastGreedy = null
+                    residualErrors = null
+                    lastPaletteColors = result.colors
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT
+                    btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
                     progress.isVisible = false
-                    updatePalettePreview(result)
+                    updatePalettePreview(result.colors)
                     val minSpread = result.colors.minOfOrNull { if (it.spreadMin.isInfinite()) Float.MAX_VALUE else it.spreadMin }
                     val spreadStr = if (minSpread == null || minSpread == Float.MAX_VALUE) "∞" else "%.2f".format(minSpread)
                     val clippedCount = result.colors.count { it.clipped }
@@ -559,18 +638,136 @@ class ImportActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun updatePalettePreview(result: S7InitResult) {
-        paletteStrip.setPalette(result)
+    private fun startPaletteGrowth() {
+        if (!FeatureFlags.S7_GREEDY) return
+        val sampling = lastSampling
+        if (sampling == null) {
+            Toast.makeText(this, "Сначала выполните S7.1", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val init = lastInit
+        if (init == null) {
+            Toast.makeText(this, "Сначала выполните S7.2", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (greedyRunning) {
+            tvStatus.text = "S7.3: уже выполняется…"
+            return
+        }
+        greedyRunning = true
+        btnGrowK.isEnabled = false
+        progress.isVisible = true
+        tvStatus.text = "S7.3: рост палитры…"
+
+        val seed = (init.params["seed"] as? Number)?.toLong()
+            ?: (sampling.params["seed"] as? Number)?.toLong()
+            ?: S7InitSpec.DEFAULT_SEED
+        val kTry = S7GreedySpec.kTry_default
+
+        Thread {
+            var residualBitmap: Bitmap? = null
+            try {
+                val result = S7Greedy.run(sampling, init, kTry, seed)
+                val errors = (result.params["residual_errors"] as? FloatArray)?.copyOf()
+                val overlaySize = ensureOverlaySize()
+                if (overlaySize != null && errors != null) {
+                    residualBitmap = S7OverlayRenderer.createResidualBitmap(
+                        overlaySize.width,
+                        overlaySize.height,
+                        sampling,
+                        errors,
+                        result.residual.deMed,
+                        result.residual.de95
+                    )
+                }
+
+                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                    try {
+                        S7GreedyIo.writeIterCsv(dir, result.iters)
+                        val k0 = init.colors.size
+                        if (k0 > 0) {
+                            S7GreedyIo.writePaletteSnapshot(dir, init.colors, k0)
+                        }
+                        val finalColors = result.colors
+                        val kFinal = finalColors.size
+                        val kMid = min(kFinal, k0 + min(4, kFinal - k0))
+                        if (kMid > k0) {
+                            S7GreedyIo.writePaletteSnapshot(dir, finalColors.take(kMid), kMid)
+                        }
+                        S7GreedyIo.writePaletteSnapshot(dir, finalColors, kFinal)
+                        residualBitmap?.let { bmp ->
+                            S7GreedyIo.writeResidualHeatmap(dir, bmp)
+                        }
+                    } catch (io: Throwable) {
+                        Logger.w("PALETTE", "greedy.io.fail", mapOf("error" to (io.message ?: "io")))
+                    }
+                }
+
+                val addedCount = result.iters.count { it.added }
+                val rejectedDup = result.iters.count { !it.added && it.reason == "dup" }
+                val errorsForUi = errors
+
+                runOnUiThread {
+                    greedyRunning = false
+                    btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
+                    progress.isVisible = false
+                    lastGreedy = result
+                    lastPaletteColors = result.colors
+                    if (errorsForUi != null) {
+                        residualErrors = errorsForUi
+                        residualDeMed = result.residual.deMed
+                        residualDe95 = result.residual.de95
+                        overlayMode = OverlayMode.RESIDUAL
+                        suppressSamplingToggle = true
+                        cbSampling.isChecked = true
+                        suppressSamplingToggle = false
+                        showResidualOverlay()
+                    } else {
+                        residualErrors = null
+                        residualDeMed = 0f
+                        residualDe95 = 0f
+                        overlayMode = OverlayMode.NONE
+                        overlay.isVisible = false
+                    }
+                    updatePalettePreview(result.colors)
+                    val de95Str = String.format(Locale.US, "%.2f", result.residual.de95)
+                    val status = "S7.3 готово: K=${result.colors.size}; de95=$de95Str; добавлено цветов=$addedCount; отклонено (dup)=$rejectedDup"
+                    tvStatus.text = status
+                }
+            } catch (t: Throwable) {
+                Logger.e("PALETTE", "greedy.fail", mapOf("stage" to "S7.3", "error" to (t.message ?: t.toString())), err = t)
+                runOnUiThread {
+                    greedyRunning = false
+                    progress.isVisible = false
+                    btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
+                    tvStatus.text = "S7.3 ошибка: ${t.message}"
+                    Toast.makeText(this, "S7.3 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                residualBitmap?.recycle()
+            }
+        }.start()
+    }
+
+    private fun updatePalettePreview(colors: List<S7InitColor>) {
+        lastPaletteColors = colors
+        paletteStrip.setPalette(colors)
         suppressPaletteToggle = true
         cbPalette.isChecked = true
         suppressPaletteToggle = false
         cbPalette.isEnabled = true
-        cbPalette.isVisible = true
+        cbPalette.isVisible = FeatureFlags.S7_INIT
         paletteStrip.isVisible = true
     }
 
     private fun resetPaletteState() {
         lastInit = null
+        lastPaletteColors = null
+        lastGreedy = null
+        residualErrors = null
+        residualDeMed = 0f
+        residualDe95 = 0f
+        greedyRunning = false
         paletteStrip.setPalette(null)
         paletteStrip.isVisible = false
         suppressPaletteToggle = true
@@ -579,6 +776,7 @@ class ImportActivity : AppCompatActivity() {
         cbPalette.isEnabled = false
         cbPalette.isVisible = FeatureFlags.S7_INIT && lastSampling != null
         btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null && !samplingRunning
+        btnGrowK.isEnabled = false
     }
 
     private fun formatAnchors(init: S7InitResult): String {

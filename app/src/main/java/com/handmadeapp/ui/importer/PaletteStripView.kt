@@ -7,7 +7,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
-import com.appforcross.editor.palette.S7InitResult
+import com.appforcross.editor.palette.S7InitColor
 import com.appforcross.editor.palette.S7InitSpec
 
 class PaletteStripView @JvmOverloads constructor(
@@ -15,7 +15,7 @@ class PaletteStripView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    private var palette: S7InitResult? = null
+    private var palette: List<S7InitColor>? = null
     private val swatchPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -25,15 +25,14 @@ class PaletteStripView @JvmOverloads constructor(
         textAlign = Paint.Align.CENTER
     }
 
-    fun setPalette(result: S7InitResult?) {
-        palette = result
+    fun setPalette(colors: List<S7InitColor>?) {
+        palette = colors
         invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val data = palette ?: return
-        val colors = data.colors
+        val colors = palette ?: return
         if (colors.isEmpty()) return
         val w = width.toFloat()
         val h = height.toFloat()

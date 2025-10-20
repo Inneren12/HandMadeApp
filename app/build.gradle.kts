@@ -63,6 +63,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
     // AppCompat/Core уже должны быть; на случай отсутствия:
     implementation("androidx.core:core-ktx:1.17.0")
+    // Коррутины: перенос тяжёлых шагов S7.* с главного потока
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // 4) KotlinX
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")

@@ -72,6 +72,12 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.pow
 import com.appforcross.editor.palette.S7OverlayRenderer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
  * Реализовано без зависимостей на Activity Result API (для совместимости) — используем onActivityResult.
@@ -90,6 +96,7 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     // Debounce для плавной перекраски предпросмотра
     private val adjustDebouncer = Debouncer(90)
+    private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
     private lateinit var btnSpread2Opt: Button
@@ -266,11 +273,15 @@ class ImportActivity : AppCompatActivity() {
 
         // Кнопка: вывести компактное резюме палитры в logcat (если уже есть palette_final_k.json)
         btnLogPalette.setOnClickListener {
-            val ok = PaletteLogProbe.logFinalPaletteFromDiag(this, headN = 8)
-            if (ok) {
-                Toast.makeText(this, "Palette summary → logcat (AiX/PALETTE)", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Palette not found yet (run S7.5/S7.6)", Toast.LENGTH_SHORT).show()
+            activityScope.launch(Dispatchers.Default) {
+                val ok = PaletteLogProbe.logFinalPaletteFromDiag(this@ImportActivity, headN = 8)
+                withContext(Dispatchers.Main) {
+                    if (ok) {
+                        Toast.makeText(this@ImportActivity, "Palette summary → logcat (AiX/PALETTE)", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@ImportActivity, "Palette not found yet (run S7.5/S7.6)", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
 
@@ -311,8 +322,15 @@ class ImportActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Во время скрытия активити не перерисовываем S7-оверлеи → меньше лагов/GC
+        // Во время скрытия активити просто выключаем и чистим overlay на экране.
         S7OverlayRenderer.setEnabled(false)
+        overlay.isVisible = false
+        overlay.clearOverlay()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        activityScope.cancel()
     }
 
     private fun openImagePicker() {
@@ -342,10 +360,10 @@ class ImportActivity : AppCompatActivity() {
         currentUri = uri
         resetSamplingState()
         cbSampling.isEnabled = false
-        Thread {
+        activityScope.launch(Dispatchers.Default) {
             try {
                 val bmp = decodePreview(uri, maxDim = 2048)
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     baseBitmap = bmp
                     image.setImageBitmap(bmp)
                     overlayImageSize = Size(bmp.width, bmp.height)
@@ -358,13 +376,13 @@ class ImportActivity : AppCompatActivity() {
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "import.decode.fail: ${t.message}", t)
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     progress.isVisible = false
                     tvStatus.text = "Ошибка загрузки: ${t.message}"
-                    Toast.makeText(this, "Ошибка загрузки: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "Ошибка загрузки: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             }
-        }.start()
+        }
     }
 
     private fun startIndexingK() {
@@ -526,17 +544,17 @@ class ImportActivity : AppCompatActivity() {
         btnProcess.isEnabled = false
         btnInitK0.isEnabled = false
 
-        Thread {
+        activityScope.launch(Dispatchers.Default) {
             try {
                 // 1) Stage3 — анализ превью (маски, метрики, классификация)
-                val analyze = Stage3Analyze.run(this, uri)
+                val analyze = Stage3Analyze.run(this@ImportActivity, uri)
 
                 // 2) Stage4 — выбор пресета/параметров
-                val stage4 = Stage4Runner.run(this, uri, targetWst = targetWst)
+                val stage4 = Stage4Runner.run(this@ImportActivity, uri, targetWst = targetWst)
 
                 // 3) PreScale — полный прогон и PNG-выход
                 val pre = PreScaleRunner.run(
-                    ctx = this,
+                    ctx = this@ImportActivity,
                     uri = uri,
                     analyze = analyze,
                     gate = stage4.gate,
@@ -547,7 +565,7 @@ class ImportActivity : AppCompatActivity() {
                 val png = File(pre.pngPath)
                 val outBmp = BitmapFactory.decodeFile(png.absolutePath)
 
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     if (outBmp != null) {
                         image.colorFilter = null   // сбросить локальные правки предпросмотра
                         image.setImageBitmap(outBmp)
@@ -559,21 +577,21 @@ class ImportActivity : AppCompatActivity() {
                     btnProcess.isEnabled = true
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     updateIndexUiState()
-                    Toast.makeText(this, "Конвейер завершён", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@ImportActivity, "Конвейер завершён", Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "pipeline.fail: ${t.message}", t)
-                runOnUiThread {
-                    lastPreScale = null
+                lastPreScale = null
+                withContext(Dispatchers.Main) {
                     progress.isVisible = false
                     btnProcess.isEnabled = true
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     tvStatus.text = "Ошибка конвейера: ${t.message}"
-                    Toast.makeText(this, "Ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "Ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
                 }
             }
-        }.start()
+        }
     }
 
     /** Реал-тайм предпросмотр с ColorMatrix (без пересборки битмапа). */

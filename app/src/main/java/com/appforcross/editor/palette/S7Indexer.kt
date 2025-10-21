@@ -231,136 +231,69 @@ object S7Indexer {
                 val assignStart = SystemClock.elapsedRealtime()
                 prepareMs = assignStart - totalStart
                 val gcBeforeAssign = captureGc()
-                scheduler.forEachTile { tile ->
-                    val tileStart = SystemClock.elapsedRealtime()
-                    tilesUpdated++
-                    val tileAggregate = tileAggregates[tile.tileId]
-                    var tileSumCost = 0.0
-                    var tileSumEb = 0.0
-                    var tileSumCoh = 0.0
-                    var tileForeignHits = 0
-                    val xStart = tile.x
-                    val xEnd = xStart + tile.width
-                    val yStart = tile.y
-                    val yEnd = yStart + tile.height
-                    for (y in yStart until yEnd) {
-                        val yOffset = y * width
-                        for (x in xStart until xEnd) {
-                            val idx = yOffset + x
-                            val zone = zoneEntries[zones[idx].toInt()]
-                            val L = lPlane[idx]
-                            val a = aPlane[idx]
-                            val b = bPlane[idx]
-                            val hue = huePlane[idx]
-                            val edge = edgeMask[idx].toDouble()
-                            val leftAssigned = if (x > 0) assigned[idx - 1] else -1
-                            val topAssigned = if (y > 0) assigned[idx - width] else -1
-
-                            var bestIdx = 0
-                            var bestCost = Double.POSITIVE_INFINITY
-                            var bestEb = 0.0
-                            var bestCoh = 0.0
-                            var bestFz = 0.0
-
-                            for (c in 0 until k) {
-                                val base = c * 3
-                                val deltaE = deltaE00(
-                                    L,
-                                    a,
-                                    b,
-                                    paletteLab[base],
-                                    paletteLab[base + 1],
-                                    paletteLab[base + 2]
-                                )
-                                val fz = foreignZonePenalty(zone, paletteRoles[c].toInt())
-                                var matches = 0
-                                var mismatches = 0
-                                if (leftAssigned >= 0) {
-                                    if (leftAssigned == c) matches++ else mismatches++
-                                }
-                                if (topAssigned >= 0) {
-                                    if (topAssigned == c) matches++ else mismatches++
-                                }
-                                val denom = matches + mismatches
-                                val coh = if (denom > 0) matches.toDouble() / denom else 0.0
-                                val eb = if (denom > 0) edge * (mismatches.toDouble() / denom) else 0.0
-                                val sh = if (zone == S7SamplingSpec.Zone.SKIN) {
-                                    val hueDelta = hueDeltaRad(hue, paletteHues[c])
-                                    val excess = abs(hueDelta) - S7IndexSpec.TAU_H_RAD
-                                    if (excess > 0.0) excess / Math.PI else 0.0
-                                } else {
-                                    0.0
-                                }
-                                val cost = S7IndexSpec.ALPHA0 * deltaE +
-                                    S7IndexSpec.BETA_FZ * fz +
-                                    S7IndexSpec.BETA_EDGE * eb +
-                                    S7IndexSpec.BETA_SKIN * sh -
-                                    S7IndexSpec.BETA_COH * coh
-                                if (cost < bestCost || (cost == bestCost && c < bestIdx)) {
-                                    bestCost = cost
-                                    bestIdx = c
-                                    bestEb = eb
-                                    bestCoh = coh
-                                    bestFz = fz
-                                }
-                            }
-
-                            distEvalsTotal += k.toLong()
-                            val prevOwner = assigned[idx]
-                            assigned[idx] = bestIdx
-                            if (bestIdx != prevOwner) {
-                                ownerChanges++
-                            }
-                            counts[bestIdx]++
-                            costs[idx] = bestCost
-                            tileSumCost += bestCost
-                            tileSumEb += bestEb
-                            tileSumCoh += bestCoh
-                            if (bestFz > 0.0) tileForeignHits++
-                            previewPixels[idx] = paletteColors[bestIdx]
-                            if (indexBpp == 8) {
-                                indexData[idx] = bestIdx.toByte()
-                            } else {
-                                val off = idx * 2
-                                indexData[off] = (bestIdx and 0xFF).toByte()
-                                indexData[off + 1] = ((bestIdx ushr 8) and 0xFF).toByte()
-                            }
-                        }
-                    }
-                    tileAggregate.sumCost = tileSumCost
-                    tileAggregate.sumEb = tileSumEb
-                    tileAggregate.sumCoh = tileSumCoh
-                    tileAggregate.foreignHits = tileForeignHits
-                    val tilePixels = tile.width * tile.height
-                    val tileMeanCost = if (tilePixels > 0) tileSumCost / tilePixels else 0.0
-                    Logger.i(
-                        "PALETTE",
-                        "index.tile",
-                        mapOf(
-                            "id" to tile.tileId,
-                            "x" to tile.x,
-                            "y" to tile.y,
-                            "w" to tile.width,
-                            "h" to tile.height,
-                            "ms" to (SystemClock.elapsedRealtime() - tileStart),
-                            "meanCost" to tileMeanCost,
-                            "EBsum" to tileSumEb,
-                            "COHsum" to tileSumCoh
-                        )
+                val metrics = if (FeatureFlags.S7_PARALLEL_TILES_ENABLED) {
+                    assignUsingTiles(
+                        scheduler = scheduler,
+                        tileAggregates = tileAggregates,
+                        width = width,
+                        height = height,
+                        total = total,
+                        k = k,
+                        zoneEntries = zoneEntries,
+                        zones = zones,
+                        lPlane = lPlane,
+                        aPlane = aPlane,
+                        bPlane = bPlane,
+                        huePlane = huePlane,
+                        edgeMask = edgeMask,
+                        paletteLab = paletteLab,
+                        paletteHues = paletteHues,
+                        paletteRoles = paletteRoles,
+                        paletteColors = paletteColors,
+                        assigned = assigned,
+                        counts = counts,
+                        costs = costs,
+                        previewPixels = previewPixels,
+                        indexData = indexData,
+                        indexBpp = indexBpp
+                    )
+                } else {
+                    assignSequential(
+                        width = width,
+                        height = height,
+                        total = total,
+                        k = k,
+                        zoneEntries = zoneEntries,
+                        zones = zones,
+                        lPlane = lPlane,
+                        aPlane = aPlane,
+                        bPlane = bPlane,
+                        huePlane = huePlane,
+                        edgeMask = edgeMask,
+                        paletteLab = paletteLab,
+                        paletteHues = paletteHues,
+                        paletteRoles = paletteRoles,
+                        paletteColors = paletteColors,
+                        assigned = assigned,
+                        counts = counts,
+                        costs = costs,
+                        previewPixels = previewPixels,
+                        indexData = indexData,
+                        indexBpp = indexBpp
                     )
                 }
+                sumCost = metrics.sumCost
+                sumEb = metrics.sumEb
+                sumCoh = metrics.sumCoh
+                foreignHits = metrics.foreignHits
+                distEvalsTotal = metrics.distEvals
+                ownerChanges = metrics.ownerChanges
+                tilesUpdated = metrics.tilesUpdated
                 val assignEnd = SystemClock.elapsedRealtime()
                 assignMs = assignEnd - assignStart
                 val gcAfterAssign = captureGc()
                 logGc("assign", gcBeforeAssign, gcAfterAssign)
-                scheduler.reduceTiles { tile ->
-                    val aggregate = tileAggregates[tile.tileId]
-                    sumCost += aggregate.sumCost
-                    sumEb += aggregate.sumEb
-                    sumCoh += aggregate.sumCoh
-                    foreignHits += aggregate.foreignHits
-                }
-                if (total > 0) sumCost / total else 0.0
+                metrics.meanCost
             } catch (t: Throwable) {
                 Logger.e(
                     "PALETTE",
@@ -571,6 +504,310 @@ object S7Indexer {
 
         @Suppress("unused")
         private val padding: LongArray = LongArray(8)
+    }
+
+    private data class AssignmentMetrics(
+        val sumCost: Double,
+        val sumEb: Double,
+        val sumCoh: Double,
+        val foreignHits: Int,
+        val distEvals: Long,
+        val ownerChanges: Long,
+        val tilesUpdated: Int,
+        val meanCost: Double
+    )
+
+    private fun assignUsingTiles(
+        scheduler: S7TileScheduler,
+        tileAggregates: Array<TileAggregate>,
+        width: Int,
+        height: Int,
+        total: Int,
+        k: Int,
+        zoneEntries: Array<S7SamplingSpec.Zone>,
+        zones: ByteArray,
+        lPlane: DoubleArray,
+        aPlane: DoubleArray,
+        bPlane: DoubleArray,
+        huePlane: DoubleArray,
+        edgeMask: FloatArray,
+        paletteLab: DoubleArray,
+        paletteHues: DoubleArray,
+        paletteRoles: ByteArray,
+        paletteColors: IntArray,
+        assigned: IntArray,
+        counts: IntArray,
+        costs: DoubleArray,
+        previewPixels: IntArray,
+        indexData: ByteArray,
+        indexBpp: Int
+    ): AssignmentMetrics {
+        var sumCost = 0.0
+        var sumEb = 0.0
+        var sumCoh = 0.0
+        var foreignHits = 0
+        var distEvals = 0L
+        var ownerChanges = 0L
+        var tilesUpdated = 0
+        scheduler.forEachTile { tile ->
+            val tileStart = SystemClock.elapsedRealtime()
+            tilesUpdated++
+            val tileAggregate = tileAggregates[tile.tileId]
+            var tileSumCost = 0.0
+            var tileSumEb = 0.0
+            var tileSumCoh = 0.0
+            var tileForeignHits = 0
+            val xStart = tile.x
+            val xEnd = xStart + tile.width
+            val yStart = tile.y
+            val yEnd = yStart + tile.height
+            for (y in yStart until yEnd) {
+                val yOffset = y * width
+                for (x in xStart until xEnd) {
+                    val idx = yOffset + x
+                    val zone = zoneEntries[zones[idx].toInt()]
+                    val L = lPlane[idx]
+                    val a = aPlane[idx]
+                    val b = bPlane[idx]
+                    val hue = huePlane[idx]
+                    val edge = edgeMask[idx].toDouble()
+                    val leftAssigned = if (x > 0) assigned[idx - 1] else -1
+                    val topAssigned = if (y > 0) assigned[idx - width] else -1
+
+                    var bestIdx = 0
+                    var bestCost = Double.POSITIVE_INFINITY
+                    var bestEb = 0.0
+                    var bestCoh = 0.0
+                    var bestFz = 0.0
+
+                    for (c in 0 until k) {
+                        val base = c * 3
+                        val deltaE = deltaE00(
+                            L,
+                            a,
+                            b,
+                            paletteLab[base],
+                            paletteLab[base + 1],
+                            paletteLab[base + 2]
+                        )
+                        val fz = foreignZonePenalty(zone, paletteRoles[c].toInt())
+                        var matches = 0
+                        var mismatches = 0
+                        if (leftAssigned >= 0) {
+                            if (leftAssigned == c) matches++ else mismatches++
+                        }
+                        if (topAssigned >= 0) {
+                            if (topAssigned == c) matches++ else mismatches++
+                        }
+                        val denom = matches + mismatches
+                        val coh = if (denom > 0) matches.toDouble() / denom else 0.0
+                        val eb = if (denom > 0) edge * (mismatches.toDouble() / denom) else 0.0
+                        val sh = if (zone == S7SamplingSpec.Zone.SKIN) {
+                            val hueDelta = hueDeltaRad(hue, paletteHues[c])
+                            val excess = abs(hueDelta) - S7IndexSpec.TAU_H_RAD
+                            if (excess > 0.0) excess / Math.PI else 0.0
+                        } else {
+                            0.0
+                        }
+                        val cost = S7IndexSpec.ALPHA0 * deltaE +
+                            S7IndexSpec.BETA_FZ * fz +
+                            S7IndexSpec.BETA_EDGE * eb +
+                            S7IndexSpec.BETA_SKIN * sh -
+                            S7IndexSpec.BETA_COH * coh
+                        if (cost < bestCost || (cost == bestCost && c < bestIdx)) {
+                            bestCost = cost
+                            bestIdx = c
+                            bestEb = eb
+                            bestCoh = coh
+                            bestFz = fz
+                        }
+                    }
+
+                    distEvals += k.toLong()
+                    val prevOwner = assigned[idx]
+                    assigned[idx] = bestIdx
+                    if (bestIdx != prevOwner) {
+                        ownerChanges++
+                    }
+                    counts[bestIdx]++
+                    costs[idx] = bestCost
+                    tileSumCost += bestCost
+                    tileSumEb += bestEb
+                    tileSumCoh += bestCoh
+                    if (bestFz > 0.0) tileForeignHits++
+                    previewPixels[idx] = paletteColors[bestIdx]
+                    if (indexBpp == 8) {
+                        indexData[idx] = bestIdx.toByte()
+                    } else {
+                        val off = idx * 2
+                        indexData[off] = (bestIdx and 0xFF).toByte()
+                        indexData[off + 1] = ((bestIdx ushr 8) and 0xFF).toByte()
+                    }
+                }
+            }
+            tileAggregate.sumCost = tileSumCost
+            tileAggregate.sumEb = tileSumEb
+            tileAggregate.sumCoh = tileSumCoh
+            tileAggregate.foreignHits = tileForeignHits
+            val tilePixels = tile.width * tile.height
+            val tileMeanCost = if (tilePixels > 0) tileSumCost / tilePixels else 0.0
+            Logger.i(
+                "PALETTE",
+                "index.tile",
+                mapOf(
+                    "id" to tile.tileId,
+                    "x" to tile.x,
+                    "y" to tile.y,
+                    "w" to tile.width,
+                    "h" to tile.height,
+                    "ms" to (SystemClock.elapsedRealtime() - tileStart),
+                    "meanCost" to tileMeanCost,
+                    "EBsum" to tileSumEb,
+                    "COHsum" to tileSumCoh
+                )
+            )
+            sumCost += tileSumCost
+            sumEb += tileSumEb
+            sumCoh += tileSumCoh
+            foreignHits += tileForeignHits
+        }
+        val meanCost = if (total > 0) sumCost / total else 0.0
+        return AssignmentMetrics(
+            sumCost = sumCost,
+            sumEb = sumEb,
+            sumCoh = sumCoh,
+            foreignHits = foreignHits,
+            distEvals = distEvals,
+            ownerChanges = ownerChanges,
+            tilesUpdated = tilesUpdated,
+            meanCost = meanCost
+        )
+    }
+
+    private fun assignSequential(
+        width: Int,
+        height: Int,
+        total: Int,
+        k: Int,
+        zoneEntries: Array<S7SamplingSpec.Zone>,
+        zones: ByteArray,
+        lPlane: DoubleArray,
+        aPlane: DoubleArray,
+        bPlane: DoubleArray,
+        huePlane: DoubleArray,
+        edgeMask: FloatArray,
+        paletteLab: DoubleArray,
+        paletteHues: DoubleArray,
+        paletteRoles: ByteArray,
+        paletteColors: IntArray,
+        assigned: IntArray,
+        counts: IntArray,
+        costs: DoubleArray,
+        previewPixels: IntArray,
+        indexData: ByteArray,
+        indexBpp: Int
+    ): AssignmentMetrics {
+        var sumCost = 0.0
+        var sumEb = 0.0
+        var sumCoh = 0.0
+        var foreignHits = 0
+        var distEvals = 0L
+        var ownerChanges = 0L
+        for (y in 0 until height) {
+            val yOffset = y * width
+            for (x in 0 until width) {
+                val idx = yOffset + x
+                val zone = zoneEntries[zones[idx].toInt()]
+                val L = lPlane[idx]
+                val a = aPlane[idx]
+                val b = bPlane[idx]
+                val hue = huePlane[idx]
+                val edge = edgeMask[idx].toDouble()
+                val leftAssigned = if (x > 0) assigned[idx - 1] else -1
+                val topAssigned = if (y > 0) assigned[idx - width] else -1
+
+                var bestIdx = 0
+                var bestCost = Double.POSITIVE_INFINITY
+                var bestEb = 0.0
+                var bestCoh = 0.0
+                var bestFz = 0.0
+
+                for (c in 0 until k) {
+                    val base = c * 3
+                    val deltaE = deltaE00(
+                        L,
+                        a,
+                        b,
+                        paletteLab[base],
+                        paletteLab[base + 1],
+                        paletteLab[base + 2]
+                    )
+                    val fz = foreignZonePenalty(zone, paletteRoles[c].toInt())
+                    var matches = 0
+                    var mismatches = 0
+                    if (leftAssigned >= 0) {
+                        if (leftAssigned == c) matches++ else mismatches++
+                    }
+                    if (topAssigned >= 0) {
+                        if (topAssigned == c) matches++ else mismatches++
+                    }
+                    val denom = matches + mismatches
+                    val coh = if (denom > 0) matches.toDouble() / denom else 0.0
+                    val eb = if (denom > 0) edge * (mismatches.toDouble() / denom) else 0.0
+                    val sh = if (zone == S7SamplingSpec.Zone.SKIN) {
+                        val hueDelta = hueDeltaRad(hue, paletteHues[c])
+                        val excess = abs(hueDelta) - S7IndexSpec.TAU_H_RAD
+                        if (excess > 0.0) excess / Math.PI else 0.0
+                    } else {
+                        0.0
+                    }
+                    val cost = S7IndexSpec.ALPHA0 * deltaE +
+                        S7IndexSpec.BETA_FZ * fz +
+                        S7IndexSpec.BETA_EDGE * eb +
+                        S7IndexSpec.BETA_SKIN * sh -
+                        S7IndexSpec.BETA_COH * coh
+                    if (cost < bestCost || (cost == bestCost && c < bestIdx)) {
+                        bestCost = cost
+                        bestIdx = c
+                        bestEb = eb
+                        bestCoh = coh
+                        bestFz = fz
+                    }
+                }
+
+                distEvals += k.toLong()
+                val prevOwner = assigned[idx]
+                assigned[idx] = bestIdx
+                if (bestIdx != prevOwner) {
+                    ownerChanges++
+                }
+                counts[bestIdx]++
+                costs[idx] = bestCost
+                sumCost += bestCost
+                sumEb += bestEb
+                sumCoh += bestCoh
+                if (bestFz > 0.0) foreignHits++
+                previewPixels[idx] = paletteColors[bestIdx]
+                if (indexBpp == 8) {
+                    indexData[idx] = bestIdx.toByte()
+                } else {
+                    val off = idx * 2
+                    indexData[off] = (bestIdx and 0xFF).toByte()
+                    indexData[off + 1] = ((bestIdx ushr 8) and 0xFF).toByte()
+                }
+            }
+        }
+        val meanCost = if (total > 0) sumCost / total else 0.0
+        return AssignmentMetrics(
+            sumCost = sumCost,
+            sumEb = sumEb,
+            sumCoh = sumCoh,
+            foreignHits = foreignHits,
+            distEvals = distEvals,
+            ownerChanges = ownerChanges,
+            tilesUpdated = 1,
+            meanCost = meanCost
+        )
     }
 
     private fun resolveZoneOrdinal(

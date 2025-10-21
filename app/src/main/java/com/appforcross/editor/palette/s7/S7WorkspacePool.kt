@@ -1,5 +1,6 @@
 package com.appforcross.editor.palette.s7
 
+import com.appforcross.editor.config.FeatureFlags
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
@@ -24,11 +25,20 @@ object S7WorkspacePool {
         require(total >= 0) { "total must be non-negative" }
         require(k >= 0) { "k must be non-negative" }
         require(bytesPerPixel > 0) { "bytesPerPixel must be positive" }
-        val indexBuffer = obtainByteBuffer(total * bytesPerPixel)
-        val planes = Array(5) { obtainDoubleArray(total) }
-        val paletteLab = obtainDoubleArray(k * 3)
-        val paletteHue = obtainDoubleArray(k)
-        val masks = Array(MASK_COUNT) { obtainFloatArray(total) }
+        val poolingEnabled = FeatureFlags.S7_BUFFER_POOL_ENABLED
+        val indexBuffer = if (poolingEnabled) {
+            obtainByteBuffer(total * bytesPerPixel)
+        } else {
+            ByteBuffer.allocate((total * bytesPerPixel).coerceAtLeast(0))
+        }
+        val planes = Array(5) {
+            if (poolingEnabled) obtainDoubleArray(total) else DoubleArray(total)
+        }
+        val paletteLab = if (poolingEnabled) obtainDoubleArray(k * 3) else DoubleArray(k * 3)
+        val paletteHue = if (poolingEnabled) obtainDoubleArray(k) else DoubleArray(k)
+        val masks = Array(MASK_COUNT) {
+            if (poolingEnabled) obtainFloatArray(total) else FloatArray(total)
+        }
         val workspace = Workspace(
             total = total,
             k = k,
@@ -39,7 +49,9 @@ object S7WorkspacePool {
             paletteHue = paletteHue,
             floatMasks = masks
         )
-        inUse[workspace] = true
+        if (poolingEnabled) {
+            inUse[workspace] = true
+        }
         return workspace
     }
 

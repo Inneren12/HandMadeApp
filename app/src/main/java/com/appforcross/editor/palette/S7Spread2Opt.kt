@@ -285,7 +285,11 @@ object S7Spread2Opt {
         val affectedHeat = computeAffected(finalAssignments, initialAssignments)
         val de95After = finalAssignments.de95
         val gbiAfter = finalAssignments.gbi
-        val tileErrorMap = currentState.assignCache.snapshotTileErrors()
+        val tileErrorMap = if (FeatureFlags.S7_TILE_ERRORMAP_ENABLED) {
+            currentState.assignCache.snapshotTileErrors()
+        } else {
+            null
+        }
         val duration = System.currentTimeMillis() - startTime
 
         Logger.i(
@@ -325,7 +329,7 @@ object S7Spread2Opt {
             put("colors_before", initialPalette.map { copyColor(it) })
             put("heatmap_ambiguity", initialState.ambiguity)
             put("heatmap_affected", affectedHeat)
-            put("tile_error_map", tileErrorMap.toDiagnostics())
+            tileErrorMap?.let { put("tile_error_map", it.toDiagnostics()) }
         }
 
         return S7Spread2OptResult(
@@ -342,6 +346,15 @@ object S7Spread2Opt {
             tileErrors = tileErrorMap,
             params = params
         )
+    }
+
+    private fun S7AssignCache.updateColorWithFallback(colorIdx: Int, lab: FloatArray, threshold: Float) {
+        if (FeatureFlags.S7_INCREMENTAL_ASSIGN_ENABLED) {
+            updateWithColor(colorIdx, lab, threshold)
+        } else {
+            invalidateAll()
+            updateWithColor(colorIdx, lab, Float.POSITIVE_INFINITY)
+        }
     }
 
     private fun findViolations(palette: List<S7InitColor>): List<S7SpreadViolation> {
@@ -566,8 +579,8 @@ object S7Spread2Opt {
             }
         }
         val candidateCache = state.assignCache.copy()
-        candidateCache.updateWithColor(i, projectedI.lab, TILE_ERROR_THRESHOLD)
-        candidateCache.updateWithColor(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
+        candidateCache.updateColorWithFallback(i, projectedI.lab, TILE_ERROR_THRESHOLD)
+        candidateCache.updateColorWithFallback(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
         val assignmentsSnapshot = candidateCache.buildSummary()
         val assignments = assignmentsSnapshot.toAssignmentSummary()
         val de95 = assignments.de95
@@ -647,8 +660,8 @@ object S7Spread2Opt {
             }
         }
         val candidateCache = state.assignCache.copy()
-        candidateCache.updateWithColor(i, projectedI.lab, TILE_ERROR_THRESHOLD)
-        candidateCache.updateWithColor(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
+        candidateCache.updateColorWithFallback(i, projectedI.lab, TILE_ERROR_THRESHOLD)
+        candidateCache.updateColorWithFallback(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
         val assignmentsSnapshot = candidateCache.buildSummary()
         val assignments = assignmentsSnapshot.toAssignmentSummary()
         val de95 = assignments.de95
@@ -713,7 +726,7 @@ object S7Spread2Opt {
         for (move in fix.moves) {
             val current = newColors[move.i]
             newColors[move.i] = current.copy(okLab = move.to.copyOf(), sRGB = labToArgb(move.to), clipped = move.clipped)
-            cache.updateWithColor(move.i, move.to, TILE_ERROR_THRESHOLD)
+            cache.updateColorWithFallback(move.i, move.to, TILE_ERROR_THRESHOLD)
         }
         val assignments = cache.buildSummary().toAssignmentSummary()
         val violations = findViolations(newColors)

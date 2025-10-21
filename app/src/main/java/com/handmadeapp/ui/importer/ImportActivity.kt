@@ -30,6 +30,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.config.FeatureFlags
+import com.appforcross.editor.config.FeatureFlags.S7Flag
+import com.appforcross.editor.config.FeatureFlags.Source
+import com.appforcross.editor.config.FeatureFlags.Stage
 import com.appforcross.editor.palette.PaletteLogcat
 import com.appforcross.editor.palette.S7Greedy
 import com.appforcross.editor.palette.S7GreedyIo
@@ -110,6 +113,12 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var cbIndexGrid: CheckBox
     private lateinit var cbIndexCost: CheckBox
     private lateinit var overlay: QuantOverlayView
+    private lateinit var cbFlagBufferPool: CheckBox
+    private lateinit var cbFlagIncrementalAssign: CheckBox
+    private lateinit var cbFlagTileErrormap: CheckBox
+    private lateinit var cbFlagDitherBuffers: CheckBox
+    private lateinit var cbFlagParallelTiles: CheckBox
+    private lateinit var featureFlagViews: Map<S7Flag, CheckBox>
 
     private var baseBitmap: Bitmap? = null
     private var currentUri: Uri? = null
@@ -146,6 +155,7 @@ class ImportActivity : AppCompatActivity() {
     private var lastPreScale: PreScaleRunner.Output? = null
     private var suppressIndexGridToggle = false
     private var suppressIndexCostToggle = false
+    private var suppressFlagToggle = false
 
     private enum class OverlayMode { NONE, SAMPLING, RESIDUAL, SPREAD, INDEX }
 
@@ -175,9 +185,23 @@ class ImportActivity : AppCompatActivity() {
         cbIndexGrid = findViewById(R.id.cbIndexGrid)
         cbIndexCost = findViewById(R.id.cbIndexCost)
         overlay = findViewById(R.id.quantOverlay)
+        cbFlagBufferPool = findViewById(R.id.cbFlagBufferPool)
+        cbFlagIncrementalAssign = findViewById(R.id.cbFlagIncrementalAssign)
+        cbFlagTileErrormap = findViewById(R.id.cbFlagTileErrormap)
+        cbFlagDitherBuffers = findViewById(R.id.cbFlagDitherBuffers)
+        cbFlagParallelTiles = findViewById(R.id.cbFlagParallelTiles)
+        featureFlagViews = mapOf(
+            S7Flag.BUFFER_POOL to cbFlagBufferPool,
+            S7Flag.INCREMENTAL_ASSIGN to cbFlagIncrementalAssign,
+            S7Flag.TILE_ERRORMAP to cbFlagTileErrormap,
+            S7Flag.DITHER_LINEBUFFERS to cbFlagDitherBuffers,
+            S7Flag.PARALLEL_TILES to cbFlagParallelTiles
+        )
         paletteStrip = findViewById(R.id.paletteStrip)
 
         FeatureFlags.logFlagsOnce()
+        setupFeatureFlagControls()
+        refreshFeatureFlagControls()
         cbSampling.isEnabled = false
         cbSampling.isChecked = false
         overlay.isVisible = false
@@ -317,7 +341,7 @@ class ImportActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // Включаем отрисовку S7-оверлеев, когда активити видима
-
+        refreshFeatureFlagControls()
     }
 
     override fun onPause() {
@@ -330,6 +354,75 @@ class ImportActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         activityScope.cancel()
+    }
+
+    private fun setupFeatureFlagControls() {
+        featureFlagViews.forEach { (flag, view) ->
+            view.setOnCheckedChangeListener { _, isChecked ->
+                if (suppressFlagToggle) return@setOnCheckedChangeListener
+                handleFeatureFlagToggle(flag, isChecked)
+            }
+        }
+    }
+
+    private fun handleFeatureFlagToggle(flag: S7Flag, enabled: Boolean) {
+        val status = FeatureFlags.getS7FlagStatus(flag)
+        if (enabled) {
+            if (status.source == Source.OVERRIDE && status.overrideStage == Stage.DISABLED) {
+                FeatureFlags.clearOverride(flag)
+            } else if (status.storedStage == Stage.DISABLED) {
+                FeatureFlags.enableS7Flag(flag, Stage.FULL)
+                FeatureFlags.clearOverride(flag)
+            } else {
+                FeatureFlags.clearOverride(flag)
+            }
+        } else {
+            FeatureFlags.overrideS7Flag(flag, Stage.DISABLED)
+        }
+        refreshFeatureFlagControls()
+    }
+
+    private fun refreshFeatureFlagControls() {
+        val statuses = FeatureFlags.getS7FlagStatuses()
+        val byFlag = statuses.associateBy { it.flag }
+        suppressFlagToggle = true
+        featureFlagViews.forEach { (flag, view) ->
+            val status = byFlag[flag]
+            if (status != null) {
+                view.isChecked = status.enabled
+                view.text = buildFlagLabel(status)
+                view.alpha = if (status.enabled) 1f else 0.6f
+                view.contentDescription = view.text
+            }
+        }
+        suppressFlagToggle = false
+        overlay.setFeatureFlagStatus(statuses)
+    }
+
+    private fun buildFlagLabel(status: FeatureFlags.FlagStatus): String {
+        val stageLabel = status.stage.label()
+        val sourceLabel = when (status.source) {
+            Source.DEFAULT -> "default"
+            Source.STORED -> "rollout"
+            Source.OVERRIDE -> if (status.overrideStage == Stage.DISABLED) {
+                "override off"
+            } else {
+                "override ${status.overrideStage?.label()}"
+            }
+        }
+        val label = "${status.flag.displayName} • $stageLabel"
+        return if (sourceLabel.isNotEmpty()) {
+            "$label ($sourceLabel)"
+        } else {
+            label
+        }
+    }
+
+    private fun Stage.label(): String = when (this) {
+        Stage.DISABLED -> "off"
+        Stage.CANARY -> "canary"
+        Stage.RAMP -> "ramp"
+        Stage.FULL -> "full"
     }
 
     private fun openImagePicker() {

@@ -127,6 +127,55 @@
         </LinearLayout>
     </HorizontalScrollView>
 
+    <LinearLayout
+        android:id="@+id/layoutFeatureFlags"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp">
+
+        <TextView
+            android:id="@+id/tvFeatureFlagsTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="S7 feature flags"
+            android:textStyle="bold" />
+
+        <CheckBox
+            android:id="@+id/cbFlagBufferPool"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Buffer pool" />
+
+        <CheckBox
+            android:id="@+id/cbFlagIncrementalAssign"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Incremental assign" />
+
+        <CheckBox
+            android:id="@+id/cbFlagTileErrormap"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tile error map" />
+
+        <CheckBox
+            android:id="@+id/cbFlagDitherBuffers"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Dither line buffers" />
+
+        <CheckBox
+            android:id="@+id/cbFlagParallelTiles"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Parallel tiles" />
+
+    </LinearLayout>
+
     <!-- Предпросмотр -->
     <FrameLayout
         android:layout_width="match_parent"

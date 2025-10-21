@@ -11,11 +11,64 @@ import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import org.json.JSONObject
 
 object DiagnosticsManager {
     private const val DIAG_DIR = "diag"
     private const val SESS_PREFIX = "session-"
     private const val MAX_SESSIONS = 5
+    private const val S7_GATES_FILE = "s7_gates.json"
+
+    data class S7Gate(val probability: Double, val target: Double) {
+        fun toMap(): Map<String, Any> = linkedMapOf(
+            "prob" to probability,
+            "target" to target
+        )
+    }
+
+    data class S7GateConfig(
+        val aaMask: Int,
+        val gates: Map<String, S7Gate>
+    ) {
+        fun gate(id: String): S7Gate = gates[id] ?: DEFAULT_S7_GATES.gates[id] ?: S7Gate(1.0, 1.0)
+
+        fun toParamMap(): Map<String, Any> {
+            val map = LinkedHashMap<String, Any>()
+            map["aa_mask"] = aaMask
+            val gatesMap = LinkedHashMap<String, Any>()
+            gates.forEach { (id, gate) ->
+                gatesMap[id] = gate.toMap()
+            }
+            map["gates"] = gatesMap
+            return map
+        }
+
+        fun summary(): String {
+            val builder = StringBuilder()
+            builder.append("AA=")
+            builder.append("0x")
+            builder.append(aaMask.toUInt().toString(16).uppercase(Locale.US))
+            val ordered = listOf("A", "B", "C", "D")
+            for (key in ordered) {
+                val gate = gates[key] ?: continue
+                builder.append(", ")
+                builder.append(key)
+                builder.append("=")
+                builder.append(String.format(Locale.US, "%.2f/%.2f", gate.probability, gate.target))
+            }
+            return builder.toString()
+        }
+    }
+
+    private val DEFAULT_S7_GATES = S7GateConfig(
+        aaMask = 0,
+        gates = linkedMapOf(
+            "A" to S7Gate(1.0, 1.0),
+            "B" to S7Gate(1.0, 1.0),
+            "C" to S7Gate(1.0, 1.0),
+            "D" to S7Gate(1.0, 1.0)
+        )
+    )
 
     data class Session(val id: String, val dir: File)
 
@@ -37,6 +90,36 @@ object DiagnosticsManager {
         val root = File(ctx.filesDir, DIAG_DIR)
         val sessions = root.listFiles()?.filter { it.isDirectory && it.name.startsWith(SESS_PREFIX) }?.sorted()
         return sessions?.lastOrNull()
+    }
+
+    fun loadS7GateConfig(ctx: Context): S7GateConfig {
+        val root = File(ctx.filesDir, DIAG_DIR)
+        val file = File(root, S7_GATES_FILE)
+        if (!file.exists()) {
+            return DEFAULT_S7_GATES
+        }
+        val text = runCatching { file.readText() }.getOrElse {
+            Logger.w("DIAG", "s7.gates.read.fail", mapOf("path" to file.absolutePath, "error" to (it.message ?: it.toString())))
+            return DEFAULT_S7_GATES
+        }
+        return runCatching {
+            val obj = JSONObject(text)
+            val mask = obj.optInt("aa_mask", DEFAULT_S7_GATES.aaMask)
+            val gatesObj = obj.optJSONObject("gates")
+            val gates = LinkedHashMap<String, S7Gate>()
+            val keys = listOf("A", "B", "C", "D")
+            for (key in keys) {
+                val gateObj = gatesObj?.optJSONObject(key)
+                val defaultGate = DEFAULT_S7_GATES.gates[key]
+                val prob = gateObj?.optDouble("prob", defaultGate?.probability ?: 1.0) ?: defaultGate?.probability ?: 1.0
+                val target = gateObj?.optDouble("target", defaultGate?.target ?: 1.0) ?: defaultGate?.target ?: 1.0
+                gates[key] = S7Gate(probability = prob, target = target)
+            }
+            S7GateConfig(mask, gates)
+        }.getOrElse {
+            Logger.w("DIAG", "s7.gates.parse.fail", mapOf("path" to file.absolutePath, "error" to (it.message ?: it.toString())))
+            DEFAULT_S7_GATES
+        }
     }
 
     fun exportZip(ctx: Context): File {

@@ -102,6 +102,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration.Companion.milliseconds
+import android.os.Handler
+import android.os.Looper
+import com.handmadeapp.watchdog.MainThreadWatchdog
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
  * Реализовано без зависимостей на Activity Result API (для совместимости) — используем onActivityResult.
@@ -126,6 +129,12 @@ class ImportActivity : AppCompatActivity() {
     private var s7JobName: String? = null
     private val progressVisibilityThrottler = ThrottledUiUpdater(activityScope, UI_THROTTLE_MS)
     private val palettePreviewThrottler = ThrottledUiUpdater(activityScope, UI_THROTTLE_MS)
+    // Поток прогресса (чтобы не дёргать UI на каждый тик)
+    private val progressSignals = MutableSharedFlow<ProgressSignal>(
+        replay = 0,
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     private var desiredProgressVisible = false
     private var pendingPaletteColors: List<S7InitColor>? = null
     private val s7TriggerDesiredState = mutableMapOf<View, Boolean>()
@@ -2378,5 +2387,11 @@ class ImportActivity : AppCompatActivity() {
         private const val RC_OPEN_IMAGE = 1001
         private const val WARMUP_BITMAP_SIZE = 64
         private val WARMUP_SCHEDULED = AtomicBoolean(false)
+        /** Частота UI-обновлений (throttle) для прогресса/палитры */
+        private const val UI_THROTTLE_MS: Long = 100
+        /** Порог «блокировки» главного потока для мониторинга */
+        private const val MAIN_BLOCK_THRESHOLD_MS: Long = 700
+        /** Интервал проверки блокировки главного потока */
+        private const val MAIN_BLOCK_MONITOR_INTERVAL_MS: Long = 500
     }
 }

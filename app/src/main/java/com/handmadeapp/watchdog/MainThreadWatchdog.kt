@@ -1,6 +1,5 @@
 package com.handmadeapp.watchdog
 
-import android.os.Debug
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -76,7 +75,6 @@ class MainThreadWatchdog(
         if (last != 0L && now - last < throttleMs) return
         lastLogAt.set(now)
 
-        Debug.dumpStack()
         val stackFrames = Looper.getMainLooper().thread.stackTrace.take(32)
         val stack = stackFrames.map { it.toString() }
         val data = LinkedHashMap<String, Any?>(4)

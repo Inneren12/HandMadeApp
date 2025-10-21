@@ -75,8 +75,10 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.pow
 import com.appforcross.editor.palette.S7OverlayRenderer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -100,6 +102,8 @@ class ImportActivity : AppCompatActivity() {
     // Debounce для плавной перекраски предпросмотра
     private val adjustDebouncer = Debouncer(90)
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val s7Scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var s7Job: Job? = null
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
     private lateinit var btnSpread2Opt: Button
@@ -354,6 +358,21 @@ class ImportActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         activityScope.cancel()
+        s7Scope.cancel()
+    }
+
+    private fun launchS7Job(taskName: String, block: suspend CoroutineScope.() -> Unit) {
+        s7Job?.cancel()
+        val job = s7Scope.launch(block = block)
+        s7Job = job
+        job.invokeOnCompletion { cause ->
+            if (s7Job === job) {
+                s7Job = null
+            }
+            if (cause is CancellationException) {
+                Logger.i("PALETTE", "s7.job.cancelled", mapOf("task" to taskName))
+            }
+        }
     }
 
     private fun setupFeatureFlagControls() {
@@ -508,8 +527,7 @@ class ImportActivity : AppCompatActivity() {
             return
         }
         if (indexRunning) {
-            tvStatus.text = "S7.6: уже выполняется…"
-            return
+            tvStatus.text = "S7.6: перезапуск…"
         }
         val kStar = kneedle.Kstar
         if (kStar <= 0) {
@@ -530,34 +548,38 @@ class ImportActivity : AppCompatActivity() {
         tvStatus.text = "S7.6: индексируем…"
         updateIndexUiState()
 
-        Thread {
+        launchS7Job("s7.index") {
             var preBitmap: Bitmap? = null
             var previewBitmap: Bitmap? = null
             var costBitmap: Bitmap? = null
-            var result: S7IndexResult? = null
+            val result: S7IndexResult
             try {
-                preBitmap = BitmapFactory.decodeFile(preScale.pngPath)
-                if (preBitmap == null) {
-                    throw IllegalStateException("Не удалось открыть preScaled PNG")
+                result = run {
+                    preBitmap = BitmapFactory.decodeFile(preScale.pngPath)
+                    if (preBitmap == null) {
+                        throw IllegalStateException("Не удалось открыть preScaled PNG")
+                    }
+                    val scaledMasks = ensureMasksFor(preBitmap!!, uri)
+                    val indexResult = S7Indexer.run(this@ImportActivity, preBitmap!!, scaledMasks, finalPalette, seed, tier)
+                    previewBitmap = BitmapFactory.decodeFile(indexResult.previewPath)
+                        ?: throw IllegalStateException("Не удалось открыть индекс-превью")
+                    val costPath = indexResult.costHeatmapPath
+                    if (costPath != null) {
+                        costBitmap = BitmapFactory.decodeFile(costPath)
+                    }
+                    indexResult
                 }
-                val scaledMasks = ensureMasksFor(preBitmap, uri)
-                result = S7Indexer.run(this, preBitmap, scaledMasks, finalPalette, seed, tier)
-                previewBitmap = BitmapFactory.decodeFile(result.previewPath)
-                    ?: throw IllegalStateException("Не удалось открыть индекс-превью")
-                val costPath = result.costHeatmapPath
-                if (costPath != null) {
-                    costBitmap = BitmapFactory.decodeFile(costPath)
-                }
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     indexRunning = false
                     progress.isVisible = false
                     lastIndexResult = result
                     updateIndexUiState()
                     val previousPreview = indexPreviewBitmap
-                    indexPreviewBitmap = previewBitmap
+                    val nextPreview = previewBitmap
+                    indexPreviewBitmap = nextPreview
                     image.colorFilter = null
-                    image.setImageBitmap(previewBitmap)
-                    if (previousPreview != null && previousPreview !== previewBitmap) {
+                    image.setImageBitmap(nextPreview)
+                    if (previousPreview != null && previousPreview !== nextPreview) {
                         previousPreview.recycle()
                     }
                     indexCostHeatmapBitmap?.let { old ->
@@ -616,13 +638,15 @@ class ImportActivity : AppCompatActivity() {
                 }
                 previewBitmap = null
                 costBitmap = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (t: Throwable) {
                 Logger.e("PALETTE", "index.fail", mapOf("stage" to "ui", "error" to (t.message ?: t.toString())), err = t)
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     indexRunning = false
                     progress.isVisible = false
                     tvStatus.text = "S7.6 ошибка: ${t.message}"
-                    Toast.makeText(this, "S7.6 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "S7.6 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
                 }
             } finally {
@@ -634,7 +658,7 @@ class ImportActivity : AppCompatActivity() {
                     costBitmap?.recycle()
                 }
             }
-        }.start()
+        }
     }
 
     /** Запуск основного конвейера: Stage3 → Stage4 → PreScale. Результат показываем в превью. */
@@ -847,23 +871,25 @@ class ImportActivity : AppCompatActivity() {
         }
         if (samplingRunning) {
             overlayPending = overlayPending || showOverlayWhenDone
-            tvStatus.text = "S7.1: расчёт уже выполняется…"
-            return
+            tvStatus.text = "S7.1: перезапуск…"
+        } else {
+            overlayPending = showOverlayWhenDone
         }
-        overlayPending = showOverlayWhenDone
         samplingRunning = true
         cbSampling.isEnabled = false
         progress.isVisible = true
         tvStatus.text = "S7.1: считаем выборку…"
         btnInitK0.isEnabled = false
 
-        Thread {
+        launchS7Job("s7.sampling") {
             try {
-                val masks = ensureMasksFor(bmp, uri)
-                val tier = S7SamplingSpec.detectDeviceTier(this).key
-                val seed = S7SamplingSpec.DEFAULT_SEED
-                val sampling = S7Sampler.run(bmp, masks, tier, seed)
-                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                val sampling = S7Sampler.run(
+                    bmp,
+                    ensureMasksFor(bmp, uri),
+                    S7SamplingSpec.detectDeviceTier(this@ImportActivity).key,
+                    S7SamplingSpec.DEFAULT_SEED
+                )
+                DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
                         S7SamplingIo.writeJson(dir, sampling)
                         S7SamplingIo.writeRoiHistogramPng(dir, sampling, bmp.width, bmp.height)
@@ -871,7 +897,7 @@ class ImportActivity : AppCompatActivity() {
                         Logger.w("PALETTE", "sampling.io.fail", mapOf("error" to (io.message ?: "io")))
                     }
                 }
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     samplingRunning = false
                     lastSampling = sampling
                     overlayImageSize = Size(bmp.width, bmp.height)
@@ -893,9 +919,11 @@ class ImportActivity : AppCompatActivity() {
                     }
                     overlayPending = false
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (t: Throwable) {
                 Logger.e("PALETTE", "sampling.fail", mapOf("error" to (t.message ?: t.toString())), err = t)
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     samplingRunning = false
                     overlayPending = false
                     progress.isVisible = false
@@ -906,10 +934,10 @@ class ImportActivity : AppCompatActivity() {
                     suppressSamplingToggle = false
                     overlay.isVisible = false
                     tvStatus.text = "S7.1 ошибка: ${t.message}"
-                    Toast.makeText(this, "S7.1 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "S7.1 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             }
-        }.start()
+        }
     }
 
     private fun ensureMasksFor(bmp: Bitmap, uri: Uri): Masks {
@@ -1086,8 +1114,7 @@ class ImportActivity : AppCompatActivity() {
             return
         }
         if (initRunning) {
-            tvStatus.text = "S7.2: уже выполняется…"
-            return
+            tvStatus.text = "S7.2: перезапуск…"
         }
         initRunning = true
         btnInitK0.isEnabled = false
@@ -1098,10 +1125,10 @@ class ImportActivity : AppCompatActivity() {
 
         val seed = (sampling.params["seed"] as? Number)?.toLong() ?: S7InitSpec.DEFAULT_SEED
 
-        Thread {
+        launchS7Job("s7.init") {
             try {
                 val result = S7Initializer.run(sampling, seed)
-                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
                         S7PaletteIo.writeInitJson(dir, result)
                         S7PaletteIo.writeStripPng(dir, result)
@@ -1110,7 +1137,7 @@ class ImportActivity : AppCompatActivity() {
                         Logger.w("PALETTE", "palette.io.fail", mapOf("error" to (io.message ?: "io")))
                     }
                 }
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     initRunning = false
                     lastInit = result
                     lastGreedy = null
@@ -1126,17 +1153,19 @@ class ImportActivity : AppCompatActivity() {
                     val anchors = formatAnchors(result)
                     tvStatus.text = "K0 готов: K=${result.colors.size}; anchors: $anchors; min spread=$spreadStr; clipped=$clippedCount"
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (t: Throwable) {
                 Logger.e("PALETTE", "init.fail", mapOf("stage" to "S7.2", "error" to (t.message ?: t.toString())), err = t)
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     initRunning = false
                     progress.isVisible = false
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT
                     tvStatus.text = "S7.2 ошибка: ${t.message}"
-                    Toast.makeText(this, "S7.2 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "S7.2 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             }
-        }.start()
+        }
     }
 
     private fun startPaletteGrowth() {
@@ -1152,8 +1181,7 @@ class ImportActivity : AppCompatActivity() {
             return
         }
         if (greedyRunning) {
-            tvStatus.text = "S7.3: уже выполняется…"
-            return
+            tvStatus.text = "S7.3: перезапуск…"
         }
         greedyRunning = true
         btnGrowK.isEnabled = false
@@ -1166,7 +1194,7 @@ class ImportActivity : AppCompatActivity() {
             ?: S7InitSpec.DEFAULT_SEED
         val kTry = S7GreedySpec.kTry_default
 
-        Thread {
+        launchS7Job("s7.greedy") {
             var residualBitmap: Bitmap? = null
             try {
                 val result = S7Greedy.run(sampling, init, kTry, seed)
@@ -1183,7 +1211,7 @@ class ImportActivity : AppCompatActivity() {
                     )
                 }
 
-                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
                         S7GreedyIo.writeIterCsv(dir, result.iters)
                         val k0 = init.colors.size
@@ -1209,7 +1237,7 @@ class ImportActivity : AppCompatActivity() {
                 val rejectedDup = result.iters.count { !it.added && it.reason == "dup" }
                 val errorsForUi = errors
 
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     greedyRunning = false
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
@@ -1246,20 +1274,22 @@ class ImportActivity : AppCompatActivity() {
                     val status = "S7.3 готово: K=${result.colors.size}; de95=$de95Str; добавлено цветов=$addedCount; отклонено (dup)=$rejectedDup"
                     tvStatus.text = status
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (t: Throwable) {
                 Logger.e("PALETTE", "greedy.fail", mapOf("stage" to "S7.3", "error" to (t.message ?: t.toString())), err = t)
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     greedyRunning = false
                     progress.isVisible = false
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastSpread != null
                     tvStatus.text = "S7.3 ошибка: ${t.message}"
-                    Toast.makeText(this, "S7.3 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "S7.3 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             } finally {
                 residualBitmap?.recycle()
             }
-        }.start()
+        }
     }
 
     private fun startSpread2Opt() {
@@ -1271,8 +1301,7 @@ class ImportActivity : AppCompatActivity() {
             return
         }
         if (spreadRunning) {
-            tvStatus.text = "S7.4: уже выполняется…"
-            return
+            tvStatus.text = "S7.4: перезапуск…"
         }
         val seed = (greedy.params["seed"] as? Number)?.toLong() ?: S7SamplingSpec.DEFAULT_SEED
         val deviceTier = (sampling.params["device_tier"] as? String) ?: S7SamplingSpec.DeviceTier.MID.key
@@ -1281,7 +1310,7 @@ class ImportActivity : AppCompatActivity() {
         progress.isVisible = true
         tvStatus.text = "S7.4: запускаем spread 2-opt…"
 
-        Thread {
+        launchS7Job("s7.spread2opt") {
             var beforeBitmap: Bitmap? = null
             var afterBitmap: Bitmap? = null
             try {
@@ -1299,7 +1328,7 @@ class ImportActivity : AppCompatActivity() {
                 val ambiguity = (result.params["heatmap_ambiguity"] as? FloatArray)?.copyOf()
                 val affected = (result.params["heatmap_affected"] as? FloatArray)?.copyOf()
 
-                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
                         S7Spread2OptIo.writeDistMatrixCsv(dir, colorsBefore, "before")
                         S7Spread2OptIo.writeDistMatrixCsv(dir, result.colors, "after")
@@ -1326,7 +1355,7 @@ class ImportActivity : AppCompatActivity() {
                     }
                 }
 
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     spreadRunning = false
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
                     progress.isVisible = false
@@ -1375,20 +1404,22 @@ class ImportActivity : AppCompatActivity() {
                     }
                     tvStatus.text = status
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (t: Throwable) {
                 Logger.e("PALETTE", "spread2opt.fail", mapOf("stage" to "S7.4", "error" to (t.message ?: t.toString())), err = t)
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     spreadRunning = false
                     progress.isVisible = false
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
                     tvStatus.text = "S7.4 ошибка: ${t.message}"
-                    Toast.makeText(this, "S7.4 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "S7.4 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             } finally {
                 beforeBitmap?.recycle()
                 afterBitmap?.recycle()
             }
-        }.start()
+        }
     }
 
     private fun startFinalizeK() {
@@ -1401,8 +1432,7 @@ class ImportActivity : AppCompatActivity() {
             return
         }
         if (kneedleRunning) {
-            tvStatus.text = "S7.5: уже выполняется…"
-            return
+            tvStatus.text = "S7.5: перезапуск…"
         }
         val palette = spread.colors
         if (palette.isEmpty()) {
@@ -1419,7 +1449,7 @@ class ImportActivity : AppCompatActivity() {
         val seed = (spread.params["seed"] as? Number)?.toLong()
             ?: (lastGreedy?.params?.get("seed") as? Number)?.toLong()
             ?: S7SamplingSpec.DEFAULT_SEED
-        Thread {
+        launchS7Job("s7.kneedle") {
             var residualBitmap: Bitmap? = null
             var indexPreview: Bitmap? = null
             try {
@@ -1442,7 +1472,7 @@ class ImportActivity : AppCompatActivity() {
                 if (base != null) {
                     indexPreview = createIndexPreviewBitmap(base, finalPalette)
                 }
-                DiagnosticsManager.currentSessionDir(this)?.let { dir ->
+                DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
                         S7KneedleIo.writeGainCsv(dir, result.rows)
                         S7KneedleIo.writeKneedlePng(dir, result.rows, result.Kstar)
@@ -1459,13 +1489,14 @@ class ImportActivity : AppCompatActivity() {
                     }
                 }
                 val errorsForUi = errors
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     kneedleRunning = false
                     btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
                     progress.isVisible = false
                     lastKneedle = result
                     val previousPreview = indexPreviewBitmap
-                    indexPreviewBitmap = indexPreview
+                    val previewForUi = indexPreview
+                    indexPreviewBitmap = previewForUi
                     updatePalettePreview(finalPalette)
                     if (errorsForUi != null) {
                         residualErrors = errorsForUi
@@ -1496,11 +1527,11 @@ class ImportActivity : AppCompatActivity() {
                         cbSampling.isChecked = false
                         suppressSamplingToggle = false
                     }
-                    indexPreview?.let {
+                    previewForUi?.let {
                         image.colorFilter = null
                         image.setImageBitmap(it)
                     }
-                    if (previousPreview != null && previousPreview !== indexPreview) {
+                    if (previousPreview != null && previousPreview !== previewForUi) {
                         previousPreview.recycle()
                     }
                     val dMax = (result.params["Dmax"] as? Number)?.toFloat() ?: 0f
@@ -1532,10 +1563,13 @@ class ImportActivity : AppCompatActivity() {
                         mapOf(
                             "Kstar" to result.Kstar,
                             "residual_ready" to (errorsForUi != null),
-                            "index_preview" to (indexPreview != null)
+                            "index_preview" to (previewForUi != null)
                         )
                     )
                 }
+                indexPreview = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (t: Throwable) {
                 Logger.e(
                     "PALETTE",
@@ -1543,18 +1577,21 @@ class ImportActivity : AppCompatActivity() {
                     mapOf("error" to (t.message ?: t.toString())),
                     err = t
                 )
-                runOnUiThread {
+                withContext(Dispatchers.Main) {
                     kneedleRunning = false
                     btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
                     progress.isVisible = false
                     tvStatus.text = "S7.5 ошибка: ${t.message}"
-                    Toast.makeText(this, "S7.5 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@ImportActivity, "S7.5 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
                 }
             } finally {
                 residualBitmap?.recycle()
+                if (indexPreview != null && indexPreview !== indexPreviewBitmap) {
+                    indexPreview?.recycle()
+                }
             }
-        }.start()
+        }
     }
 
     private fun updatePalettePreview(colors: List<S7InitColor>) {

@@ -1,5 +1,6 @@
 package com.handmadeapp.logging
 
+import android.os.Process
 import android.util.Log
 import com.appforcross.editor.logging.LogEvent
 import java.io.BufferedWriter
@@ -10,6 +11,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import com.handmadeapp.logging.LogLevel
+import kotlin.system.exitProcess
 
 /** Структурный логгер: JSONL в файл + (dev) в Logcat. Однопоточная запись. */
 object Logger {
@@ -17,6 +19,7 @@ object Logger {
     private val sessionIdRef = AtomicReference<String?>(null)
     private val fileRef = AtomicReference<File?>(null)
     private val running = AtomicBoolean(false)
+    private val fatalAction = AtomicReference<(() -> Unit)?>(null)
     private val writerExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "logger-writer").apply { isDaemon = true }
     }
@@ -41,6 +44,10 @@ object Logger {
 
     fun shutdown() { running.set(false) }
 
+    fun setFatalAction(action: (() -> Unit)?) {
+        fatalAction.set(action)
+    }
+
     fun d(cat: String, msg: String, data: Map<String, Any?> = emptyMap(), req: String? = null, tile: String? = null) =
         log(LogLevel.DEBUG, cat, msg, data, req, tile)
     fun i(cat: String, msg: String, data: Map<String, Any?> = emptyMap(), req: String? = null, tile: String? = null) =
@@ -58,6 +65,27 @@ object Logger {
     fun e(cat: String, msg: String, data: Map<String, Any?> = emptyMap(), req: String? = null, tile: String? = null, err: Throwable? = null) {
         val m = if (err != null) data + ("error" to (err.message ?: err.toString())) else data
         log(LogLevel.ERROR, cat, msg, m, req, tile)
+    }
+
+    fun fatal(
+        cat: String,
+        msg: String,
+        data: Map<String, Any?> = emptyMap(),
+        req: String? = null,
+        tile: String? = null,
+        err: Throwable? = null
+    ): Nothing {
+        val m = if (err != null) data + ("error" to (err.message ?: err.toString())) else data
+        log(LogLevel.ERROR, cat, msg, m + ("fatal" to true), req, tile)
+        shutdown()
+        val action = fatalAction.get()
+        if (action != null) {
+            action.invoke()
+        } else {
+            Process.killProcess(Process.myPid())
+            exitProcess(10)
+        }
+        throw IllegalStateException("Fatal logger action returned")
     }
 
     fun log(level: LogLevel, cat: String, msg: String, data: Map<String, Any?>, req: String?, tile: String?) {

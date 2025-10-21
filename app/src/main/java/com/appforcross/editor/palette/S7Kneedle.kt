@@ -39,6 +39,7 @@ object S7Kneedle {
         K_try: Int,
         seed: Long
     ): S7KneedleResult {
+        S7ThreadGuard.assertBackground("s7.kneedle.run")
         FeatureFlags.logKneedleFlag()
         require(K_try <= paletteAfterS74.size) { "K_try exceeds palette size" }
         val startTime = System.currentTimeMillis()

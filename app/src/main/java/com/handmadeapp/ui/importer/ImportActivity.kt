@@ -27,6 +27,7 @@ import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
@@ -109,12 +110,9 @@ class ImportActivity : AppCompatActivity() {
     // Debounce для плавной перекраски предпросмотра
     private val adjustDebouncer = Debouncer(90)
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val s7Scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val s7Scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
     private var s7Job: Job? = null
-    private val progressSignals = MutableSharedFlow<ProgressSignal>(
-        extraBufferCapacity = 32,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST
-    )
+    private var s7JobName: String? = null
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
     private lateinit var btnSpread2Opt: Button
@@ -375,17 +373,53 @@ class ImportActivity : AppCompatActivity() {
         s7Scope.cancel()
     }
 
-    private fun launchS7Job(taskName: String, block: suspend CoroutineScope.() -> Unit) {
-        s7Job?.cancel()
-        val job = s7Scope.launch(block = block)
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal fun launchS7Job(taskName: String, block: suspend CoroutineScope.() -> Unit) {
+        val previousJob = s7Job
+        val previousName = s7JobName
+        if (previousJob != null) {
+            Logger.i(
+                "PALETTE",
+                "s7.job.cancel.request",
+                mapOf("task" to previousName, "next" to taskName)
+            )
+            previousJob.cancel(CancellationException("Superseded by $taskName"))
+        }
+
+        val job = s7Scope.launch {
+            Logger.i(
+                "PALETTE",
+                "s7.job.start",
+                mapOf("task" to taskName, "cancelledPrev" to (previousJob != null))
+            )
+            block()
+        }
         s7Job = job
+        s7JobName = taskName
         job.invokeOnCompletion { cause ->
+            val completionStatus = when {
+                cause == null -> "completed"
+                cause is CancellationException -> "cancelled"
+                else -> "failed"
+            }
+            Logger.i(
+                "PALETTE",
+                "s7.job.finish",
+                mapOf("task" to taskName, "status" to completionStatus)
+            )
             if (s7Job === job) {
                 s7Job = null
+                s7JobName = null
             }
-            if (cause is CancellationException) {
-                Logger.i("PALETTE", "s7.job.cancelled", mapOf("task" to taskName))
-            }
+        }
+    }
+
+    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
+    internal suspend fun awaitS7IdleForTest() {
+        while (true) {
+            val job = s7Job ?: break
+            job.join()
+            if (s7Job == null) break
         }
     }
 

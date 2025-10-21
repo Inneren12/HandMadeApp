@@ -57,18 +57,87 @@ data class S7IndexResult(
 
 object S7Indexer {
 
+    enum class Mode { PREVIEW, EXPORT }
+
+    internal const val MAX_PREVIEW_PIXELS: Long = 4_000_000L
+
+    internal fun ensurePreviewBounds(
+        mode: Mode,
+        srcWidth: Int,
+        srcHeight: Int,
+        previewWidth: Int,
+        previewHeight: Int
+    ) {
+        require(srcWidth > 0 && srcHeight > 0) { "Source is empty" }
+        require(previewWidth > 0 && previewHeight > 0) { "Preview is empty" }
+        if (mode == Mode.PREVIEW) {
+            val previewPixels = previewWidth.toLong() * previewHeight.toLong()
+            if (previewPixels > MAX_PREVIEW_PIXELS) {
+                Logger.w(
+                    "PALETTE",
+                    "s7.preview.downscale_required",
+                    mapOf(
+                        "src" to "${srcWidth}x${srcHeight}",
+                        "preview" to "${previewWidth}x${previewHeight}",
+                        "preview_px" to previewPixels,
+                        "max_preview_px" to MAX_PREVIEW_PIXELS,
+                        "mode" to mode.name
+                    )
+                )
+                val message = buildString {
+                    append("Preview ")
+                    append(previewWidth)
+                    append('x')
+                    append(previewHeight)
+                    append(" (")
+                    append(previewPixels)
+                    append(" px) exceeds preview limit of ")
+                    append(MAX_PREVIEW_PIXELS)
+                    append(" pixels; downscale required")
+                }
+                throw IllegalArgumentException(message)
+            }
+        }
+    }
+
     fun run(
         ctx: Context,
         preScaledImage: Bitmap,
         masks: Masks,
         paletteK: List<S7InitColor>,
         seed: Long,
-        deviceTier: String
+        deviceTier: String,
+        mode: Mode = Mode.PREVIEW,
+        sourceWidth: Int? = null,
+        sourceHeight: Int? = null
     ): S7IndexResult {
+        S7ThreadGuard.assertBackground("s7.index.run")
         FeatureFlags.logIndexFlag()
         val totalStart = SystemClock.elapsedRealtime()
-        val width = preScaledImage.width
-        val height = preScaledImage.height
+        val previewWidth = preScaledImage.width
+        val previewHeight = preScaledImage.height
+        val srcWidth = when {
+            sourceWidth != null && sourceWidth > 0 -> sourceWidth
+            masks.edge.width > 0 -> masks.edge.width
+            else -> previewWidth
+        }
+        val srcHeight = when {
+            sourceHeight != null && sourceHeight > 0 -> sourceHeight
+            masks.edge.height > 0 -> masks.edge.height
+            else -> previewHeight
+        }
+        Logger.i(
+            "PALETTE",
+            "s7.start",
+            mapOf(
+                "src" to "${srcWidth}x${srcHeight}",
+                "preview" to "${previewWidth}x${previewHeight}",
+                "mode" to mode.name
+            )
+        )
+        ensurePreviewBounds(mode, srcWidth, srcHeight, previewWidth, previewHeight)
+        val width = previewWidth
+        val height = previewHeight
         require(width > 0 && height > 0) { "Image is empty" }
         val total = width * height
         val k = paletteK.size
@@ -89,6 +158,7 @@ object S7Indexer {
         )
 
         return S7WorkspacePool.acquire(total, k, bytesPerPixel).use { workspace ->
+            S7ThreadGuard.assertBackground("s7.index.prepare")
             val indexBuffer = workspace.indexBuffer
             val indexData = workspace.indexBytes
             val previewPixels = IntArray(total)
@@ -340,6 +410,7 @@ object S7Indexer {
                 )
             )
 
+            S7ThreadGuard.assertBackground("s7.index.dither")
             val ditherStart = SystemClock.elapsedRealtime()
             val gcBeforeDither = captureGc()
             val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -548,6 +619,7 @@ object S7Indexer {
         indexData: ByteArray,
         indexBpp: Int
     ): AssignmentMetrics {
+        S7ThreadGuard.assertBackground("s7.index.assign.tiles")
         var sumCost = 0.0
         var sumEb = 0.0
         var sumCoh = 0.0
@@ -713,6 +785,7 @@ object S7Indexer {
         indexData: ByteArray,
         indexBpp: Int
     ): AssignmentMetrics {
+        S7ThreadGuard.assertBackground("s7.index.assign.seq")
         var sumCost = 0.0
         var sumEb = 0.0
         var sumCoh = 0.0

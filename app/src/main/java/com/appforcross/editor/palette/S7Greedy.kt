@@ -52,6 +52,7 @@ object S7Greedy {
         kTry: Int,
         seed: Long
     ): S7GreedyResult {
+        S7ThreadGuard.assertBackground("s7.greedy.run")
         FeatureFlags.logGreedyFlag()
         require(kTry >= 0) { "kTry must be non-negative" }
         val samples = sampling.samples

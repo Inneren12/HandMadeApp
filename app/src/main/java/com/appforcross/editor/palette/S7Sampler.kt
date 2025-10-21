@@ -31,6 +31,7 @@ data class S7SamplingResult(
 
 object S7Sampler {
     fun run(previewBitmap: Bitmap, masks: Masks, deviceTier: String, seed: Long): S7SamplingResult {
+        S7ThreadGuard.assertBackground("s7.sampler.run")
         val width = previewBitmap.width
         val height = previewBitmap.height
         val totalPixels = width * height

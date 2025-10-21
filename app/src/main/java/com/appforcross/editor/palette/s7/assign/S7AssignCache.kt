@@ -1,6 +1,8 @@
 package com.appforcross.editor.palette.s7.assign
 
 import com.appforcross.editor.palette.S7Sample
+import com.handmadeapp.quant.PaletteQuantBuffers
+import java.io.Closeable
 import java.util.ArrayList
 import java.util.HashMap
 import kotlin.math.PI
@@ -32,8 +34,9 @@ class S7AssignCache private constructor(
     private var totalImportance: Double,
     private var bandNumerator: Double,
     private val bandDenominator: Double,
-    private val invalidTiles: BooleanArray
-) {
+    private val invalidTiles: BooleanArray,
+    private val buffers: PaletteQuantBuffers.Workspace
+) : Closeable {
 
     val ownerIndices: IntArray get() = owners
     val minDistancesSquared: FloatArray get() = d2min
@@ -46,29 +49,59 @@ class S7AssignCache private constructor(
     val tileH: Int get() = tileHeight
 
     fun copy(): S7AssignCache {
-        return S7AssignCache(
-            samples = samples,
-            tileWidth = tileWidth,
-            tileHeight = tileHeight,
-            tileColumns = tileColumns,
-            tileRows = tileRows,
-            tileIndices = tileIndices,
-            tileToSamples = tileToSamples,
-            weights = weights,
-            riskWeights = riskWeights,
-            errorThreshold = errorThreshold,
-            paletteLabs = Array(paletteLabs.size) { paletteLabs[it].copyOf() },
-            owners = owners.copyOf(),
-            secondOwners = secondOwners.copyOf(),
-            d2min = d2min.copyOf(),
-            d2second = d2second.copyOf(),
-            errorPerTile = errorPerTile.copyOf(),
-            perColorImportance = perColorImportance.copyOf(),
-            totalImportance = totalImportance,
-            bandNumerator = bandNumerator,
-            bandDenominator = bandDenominator,
-            invalidTiles = BooleanArray(invalidTiles.size)
-        )
+        val sampleCount = owners.size
+        val paletteSize = paletteLabs.size
+        val tileCount = tileColumns * tileRows
+        val workspace = PaletteQuantBuffers.acquire(sampleCount, paletteSize, tileCount)
+        try {
+            val tileIndexCopy = workspace.tileIndices
+            tileIndices.copyInto(tileIndexCopy)
+            val ownersCopy = workspace.owners
+            owners.copyInto(ownersCopy)
+            val secondOwnersCopy = workspace.secondOwners
+            secondOwners.copyInto(secondOwnersCopy)
+            val d2MinCopy = workspace.d2min
+            d2min.copyInto(d2MinCopy)
+            val d2SecondCopy = workspace.d2second
+            d2second.copyInto(d2SecondCopy)
+            val errorPerTileCopy = workspace.errorPerTile
+            errorPerTile.copyInto(errorPerTileCopy)
+            val weightsCopy = workspace.weights
+            weights.copyInto(weightsCopy)
+            val riskCopy = workspace.riskWeights
+            riskWeights.copyInto(riskCopy)
+            val importanceCopy = workspace.perColorImportance
+            perColorImportance.copyInto(importanceCopy)
+            val invalidCopy = workspace.invalidTiles
+            invalidTiles.copyInto(invalidCopy)
+            return S7AssignCache(
+                samples = samples,
+                tileWidth = tileWidth,
+                tileHeight = tileHeight,
+                tileColumns = tileColumns,
+                tileRows = tileRows,
+                tileIndices = tileIndexCopy,
+                tileToSamples = tileToSamples,
+                weights = weightsCopy,
+                riskWeights = riskCopy,
+                errorThreshold = errorThreshold,
+                paletteLabs = Array(paletteLabs.size) { paletteLabs[it].copyOf() },
+                owners = ownersCopy,
+                secondOwners = secondOwnersCopy,
+                d2min = d2MinCopy,
+                d2second = d2SecondCopy,
+                errorPerTile = errorPerTileCopy,
+                perColorImportance = importanceCopy,
+                totalImportance = totalImportance,
+                bandNumerator = bandNumerator,
+                bandDenominator = bandDenominator,
+                invalidTiles = invalidCopy,
+                buffers = workspace
+            )
+        } catch (t: Throwable) {
+            workspace.close()
+            throw t
+        }
     }
 
     fun updateWithColor(colorIdx: Int, lab: FloatArray, threshold: Float = errorThreshold) {
@@ -233,6 +266,10 @@ class S7AssignCache private constructor(
         invalidTiles[tileIdx] = false
     }
 
+    override fun close() {
+        buffers.close()
+    }
+
     companion object {
         private fun sqrtSafe(value: Float): Float {
             return if (value.isFinite()) {
@@ -338,60 +375,87 @@ class S7AssignCache private constructor(
             val cols = maxOf(1, (width + tileWidth - 1) / tileWidth)
             val rows = maxOf(1, (height + tileHeight - 1) / tileHeight)
             val tileCount = cols * rows
-            val tileIdx = IntArray(samples.size)
-            val counts = IntArray(tileCount)
-            for (i in samples.indices) {
-                val sx = samples[i].x.coerceAtLeast(0)
-                val sy = samples[i].y.coerceAtLeast(0)
-                val cx = (sx / tileWidth).coerceIn(0, cols - 1)
-                val cy = (sy / tileHeight).coerceIn(0, rows - 1)
-                val index = cy * cols + cx
-                tileIdx[i] = index
-                counts[index]++
+            val sampleCount = samples.size
+            val paletteSize = paletteLabs.size
+            val workspace = PaletteQuantBuffers.acquire(sampleCount, paletteSize, tileCount)
+            try {
+                val tileIdx = workspace.tileIndices
+                val counts = workspace.scratchCounts
+                    ?: error("scratchCounts not allocated")
+                counts.fill(0)
+                for (i in samples.indices) {
+                    val sx = samples[i].x.coerceAtLeast(0)
+                    val sy = samples[i].y.coerceAtLeast(0)
+                    val cx = (sx / tileWidth).coerceIn(0, cols - 1)
+                    val cy = (sy / tileHeight).coerceIn(0, rows - 1)
+                    val index = cy * cols + cx
+                    tileIdx[i] = index
+                    counts[index]++
+                }
+                val tileSamples = Array(tileCount) { IntArray(counts[it]) }
+                val offsets = workspace.scratchOffsets
+                    ?: error("scratchOffsets not allocated")
+                offsets.fill(0)
+                for (i in samples.indices) {
+                    val tile = tileIdx[i]
+                    val offset = offsets[tile]
+                    tileSamples[tile][offset] = i
+                    offsets[tile] = offset + 1
+                }
+                val palette = Array(paletteSize) { idx -> paletteLabs[idx].copyOf() }
+                val owners = workspace.owners
+                owners.fill(-1)
+                val secondOwners = workspace.secondOwners
+                secondOwners.fill(-1)
+                val d2min = workspace.d2min
+                d2min.fill(Float.POSITIVE_INFINITY)
+                val d2second = workspace.d2second
+                d2second.fill(Float.POSITIVE_INFINITY)
+                val errorPerTile = workspace.errorPerTile
+                errorPerTile.fill(0f)
+                val weights = workspace.weights
+                for (i in samples.indices) {
+                    weights[i] = samples[i].w
+                }
+                val riskWeights = workspace.riskWeights
+                for (i in samples.indices) {
+                    riskWeights[i] = samples[i].R * samples[i].w
+                }
+                val perColorImportance = workspace.perColorImportance
+                perColorImportance.fill(0.0)
+                val invalidTiles = workspace.invalidTiles
+                invalidTiles.fill(false)
+                val bandDenominator = riskWeights.sumOf { it.toDouble() }
+                val cache = S7AssignCache(
+                    samples = samples,
+                    tileWidth = tileWidth,
+                    tileHeight = tileHeight,
+                    tileColumns = cols,
+                    tileRows = rows,
+                    tileIndices = tileIdx,
+                    tileToSamples = tileSamples,
+                    weights = weights,
+                    riskWeights = riskWeights,
+                    errorThreshold = threshold,
+                    paletteLabs = palette,
+                    owners = owners,
+                    secondOwners = secondOwners,
+                    d2min = d2min,
+                    d2second = d2second,
+                    errorPerTile = errorPerTile,
+                    perColorImportance = perColorImportance,
+                    totalImportance = 0.0,
+                    bandNumerator = 0.0,
+                    bandDenominator = bandDenominator,
+                    invalidTiles = invalidTiles,
+                    buffers = workspace
+                )
+                cache.recomputeAll()
+                return cache
+            } catch (t: Throwable) {
+                workspace.close()
+                throw t
             }
-            val tileSamples = Array(tileCount) { IntArray(counts[it]) }
-            val offsets = IntArray(tileCount)
-            for (i in samples.indices) {
-                val tile = tileIdx[i]
-                val offset = offsets[tile]
-                tileSamples[tile][offset] = i
-                offsets[tile] = offset + 1
-            }
-            val palette = Array(paletteLabs.size) { idx -> paletteLabs[idx].copyOf() }
-            val owners = IntArray(samples.size) { -1 }
-            val secondOwners = IntArray(samples.size) { -1 }
-            val d2min = FloatArray(samples.size) { Float.POSITIVE_INFINITY }
-            val d2second = FloatArray(samples.size) { Float.POSITIVE_INFINITY }
-            val errorPerTile = FloatArray(tileCount)
-            val weights = FloatArray(samples.size) { samples[it].w }
-            val riskWeights = FloatArray(samples.size) { samples[it].R * samples[it].w }
-            val perColorImportance = DoubleArray(palette.size)
-            val bandDenominator = riskWeights.sumOf { it.toDouble() }
-            val cache = S7AssignCache(
-                samples = samples,
-                tileWidth = tileWidth,
-                tileHeight = tileHeight,
-                tileColumns = cols,
-                tileRows = rows,
-                tileIndices = tileIdx,
-                tileToSamples = tileSamples,
-                weights = weights,
-                riskWeights = riskWeights,
-                errorThreshold = threshold,
-                paletteLabs = palette,
-                owners = owners,
-                secondOwners = secondOwners,
-                d2min = d2min,
-                d2second = d2second,
-                errorPerTile = errorPerTile,
-                perColorImportance = perColorImportance,
-                totalImportance = 0.0,
-                bandNumerator = 0.0,
-                bandDenominator = bandDenominator,
-                invalidTiles = BooleanArray(tileCount)
-            )
-            cache.recomputeAll()
-            return cache
         }
     }
 }

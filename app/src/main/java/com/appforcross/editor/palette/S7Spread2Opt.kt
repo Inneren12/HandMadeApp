@@ -2,8 +2,13 @@ package com.appforcross.editor.palette
 
 import android.graphics.Color
 import com.appforcross.editor.config.FeatureFlags
+import com.appforcross.editor.palette.s7.assign.AssignmentSummarySnapshot
+import com.appforcross.editor.palette.s7.assign.S7AssignCache
+import com.appforcross.editor.palette.s7.assign.S7TileErrorMap
 import com.handmadeapp.color.ColorMgmt
 import com.handmadeapp.logging.Logger
+import java.util.ArrayList
+import java.util.LinkedHashMap
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
@@ -14,6 +19,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val ALGO_VERSION = "S7.4-spread2opt-v1"
+private const val TILE_ERROR_THRESHOLD = 2.0f
 
 data class S7SpreadViolation(val i: Int, val j: Int, val de: Float)
 
@@ -47,6 +53,7 @@ data class S7Spread2OptResult(
     val de95After: Float,
     val gbiBefore: Float,
     val gbiAfter: Float,
+    val tileErrors: S7TileErrorMap?,
     val params: Map<String, Any?>
 )
 
@@ -64,9 +71,24 @@ object S7Spread2Opt {
         val gbi: Float
     )
 
+    private fun AssignmentSummarySnapshot.toAssignmentSummary(): AssignmentSummary {
+        return AssignmentSummary(
+            nearest = nearest,
+            nearestDist = nearestDist,
+            second = second,
+            secondDist = secondDist,
+            perColorSamples = perColorSamples,
+            perColorImportance = perColorImportance,
+            totalImportance = totalImportance,
+            de95 = de95,
+            gbi = gbi
+        )
+    }
+
     private data class PaletteState(
         val colors: MutableList<S7InitColor>,
         val assignments: AssignmentSummary,
+        val assignCache: S7AssignCache,
         val violations: List<S7SpreadViolation>,
         val deMin: Float,
         val ambiguity: FloatArray
@@ -123,7 +145,17 @@ object S7Spread2Opt {
         Logger.i("PALETTE", "spread2opt.start", logStart)
 
         val startTime = System.currentTimeMillis()
-        val initialAssignments = computeAssignments(initialPalette, samples)
+        val previewWidth = (samples.maxOfOrNull { it.x } ?: 0) + 1
+        val previewHeight = (samples.maxOfOrNull { it.y } ?: 0) + 1
+        val tileSpec = S7IndexSpec.tileForTier(deviceTier, previewWidth, previewHeight)
+        val initialCache = S7AssignCache.create(
+            samples = samples,
+            paletteLabs = initialPalette.map { it.okLab },
+            tileWidth = tileSpec.width,
+            tileHeight = tileSpec.height,
+            threshold = TILE_ERROR_THRESHOLD
+        )
+        val initialAssignments = initialCache.buildSummary().toAssignmentSummary()
         val violations = findViolations(initialPalette)
         val deMinBefore = violations.firstOrNull()?.de ?: computeMinDistance(initialPalette)
         Logger.i(
@@ -139,6 +171,7 @@ object S7Spread2Opt {
         val initialState = PaletteState(
             colors = initialPalette.toMutableList(),
             assignments = initialAssignments,
+            assignCache = initialCache,
             violations = violations,
             deMin = deMinBefore,
             ambiguity = ambiguity
@@ -225,14 +258,8 @@ object S7Spread2Opt {
                     acceptedFixes++
                     clippedMoves += fix.moves.count { it.clipped }
                     currentState = applyFix(currentState, fix)
-                    val updatedAssignments = computeAssignments(currentState.colors, samples)
-                    currentState = currentState.copy(
-                        assignments = updatedAssignments,
-                        violations = findViolations(currentState.colors),
-                        deMin = computeMinDistance(currentState.colors)
-                    )
-                    currentDe95 = updatedAssignments.de95
-                    currentGbi = updatedAssignments.gbi
+                    currentDe95 = currentState.assignments.de95
+                    currentGbi = currentState.assignments.gbi
                 } else {
                     passRejected++
                     rejectedFixes++
@@ -258,6 +285,7 @@ object S7Spread2Opt {
         val affectedHeat = computeAffected(finalAssignments, initialAssignments)
         val de95After = finalAssignments.de95
         val gbiAfter = finalAssignments.gbi
+        val tileErrorMap = currentState.assignCache.snapshotTileErrors()
         val duration = System.currentTimeMillis() - startTime
 
         Logger.i(
@@ -297,6 +325,7 @@ object S7Spread2Opt {
             put("colors_before", initialPalette.map { copyColor(it) })
             put("heatmap_ambiguity", initialState.ambiguity)
             put("heatmap_affected", affectedHeat)
+            put("tile_error_map", tileErrorMap.toDiagnostics())
         }
 
         return S7Spread2OptResult(
@@ -310,75 +339,8 @@ object S7Spread2Opt {
             de95After = de95After,
             gbiBefore = initialAssignments.gbi,
             gbiAfter = gbiAfter,
+            tileErrors = tileErrorMap,
             params = params
-        )
-    }
-
-    private fun computeAssignments(
-        palette: List<S7InitColor>,
-        samples: List<S7Sample>
-    ): AssignmentSummary {
-        val n = samples.size
-        val k = palette.size
-        val nearest = IntArray(n) { -1 }
-        val nearestDist = FloatArray(n) { Float.POSITIVE_INFINITY }
-        val second = IntArray(n) { -1 }
-        val secondDist = FloatArray(n) { Float.POSITIVE_INFINITY }
-        val perColorLists = Array(k) { ArrayList<Int>() }
-        val perColorImportance = DoubleArray(k)
-        val errors = FloatArray(n)
-        val bandWeighted = DoubleArray(2)
-        for (idx in samples.indices) {
-            val sample = samples[idx]
-            var bestIdx = 0
-            var bestDist = Float.POSITIVE_INFINITY
-            var secondIdx = -1
-            var secondBest = Float.POSITIVE_INFINITY
-            val lab = sample.oklab
-            for (colorIdx in palette.indices) {
-                val d = distance(lab, palette[colorIdx].okLab)
-                if (d < bestDist) {
-                    secondBest = bestDist
-                    secondIdx = bestIdx
-                    bestDist = d
-                    bestIdx = colorIdx
-                } else if (d < secondBest) {
-                    secondBest = d
-                    secondIdx = colorIdx
-                }
-            }
-            nearest[idx] = bestIdx
-            nearestDist[idx] = bestDist
-            second[idx] = secondIdx
-            secondDist[idx] = secondBest
-            perColorLists[bestIdx].add(idx)
-            val imp = bestDist * sample.w
-            perColorImportance[bestIdx] += imp.toDouble()
-            errors[idx] = bestDist
-            bandWeighted[0] += (bestDist * sample.R * sample.w).toDouble()
-            bandWeighted[1] += (sample.R * sample.w).toDouble()
-        }
-        val perColorSamples = Array(palette.size) { IntArray(perColorLists[it].size) }
-        for (i in perColorLists.indices) {
-            perColorSamples[i] = perColorLists[i].toIntArray()
-        }
-        val totalImp = perColorImportance.sum()
-        val de95 = percentile(nearestDist, 0.95)
-        val gbi = if (bandWeighted[1] > 0.0) {
-            (bandWeighted[0] / bandWeighted[1]).toFloat()
-        } else {
-            0f
-        }
-        return AssignmentSummary(
-            nearest = nearest,
-            nearestDist = nearestDist,
-            second = second,
-            secondDist = secondDist,
-            perColorSamples = perColorSamples,
-            perColorImportance = perColorImportance,
-            totalImportance = totalImp,
-            de95 = de95,
-            gbi = gbi
         )
     }
 
@@ -603,7 +565,11 @@ object S7Spread2Opt {
                 else -> color
             }
         }
-        val assignments = computeAssignments(candidatePalette, samples)
+        val candidateCache = state.assignCache.copy()
+        candidateCache.updateWithColor(i, projectedI.lab, TILE_ERROR_THRESHOLD)
+        candidateCache.updateWithColor(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
+        val assignmentsSnapshot = candidateCache.buildSummary()
+        val assignments = assignmentsSnapshot.toAssignmentSummary()
         val de95 = assignments.de95
         val gbi = assignments.gbi
         val shiftI = distance(state.colors[i].okLab, projectedI.lab)
@@ -680,7 +646,11 @@ object S7Spread2Opt {
                 else -> color
             }
         }
-        val assignments = computeAssignments(candidatePalette, samples)
+        val candidateCache = state.assignCache.copy()
+        candidateCache.updateWithColor(i, projectedI.lab, TILE_ERROR_THRESHOLD)
+        candidateCache.updateWithColor(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
+        val assignmentsSnapshot = candidateCache.buildSummary()
+        val assignments = assignmentsSnapshot.toAssignmentSummary()
         val de95 = assignments.de95
         val gbi = assignments.gbi
         val shiftI = distance(state.colors[i].okLab, projectedI.lab)
@@ -739,11 +709,22 @@ object S7Spread2Opt {
     private fun applyFix(state: PaletteState, fix: S7PairFix): PaletteState {
         if (fix.moves.isEmpty()) return state
         val newColors = state.colors.toMutableList()
+        val cache = state.assignCache
         for (move in fix.moves) {
             val current = newColors[move.i]
             newColors[move.i] = current.copy(okLab = move.to.copyOf(), sRGB = labToArgb(move.to), clipped = move.clipped)
+            cache.updateWithColor(move.i, move.to, TILE_ERROR_THRESHOLD)
         }
-        return state.copy(colors = newColors)
+        val assignments = cache.buildSummary().toAssignmentSummary()
+        val violations = findViolations(newColors)
+        val deMin = computeMinDistance(newColors)
+        return state.copy(
+            colors = newColors,
+            assignments = assignments,
+            assignCache = cache,
+            violations = violations,
+            deMin = deMin
+        )
     }
 
     private fun projectLab(lab: FloatArray): ProjectedColor {
@@ -863,19 +844,6 @@ object S7Spread2Opt {
     }
 
     private fun degToRad(deg: Double): Double = deg / 180.0 * Math.PI
-
-    private fun percentile(values: FloatArray, p: Double): Float {
-        if (values.isEmpty()) return 0f
-        val sorted = values.map { it.toDouble() }.sorted()
-        val n = sorted.size
-        if (n == 1) return sorted[0].toFloat()
-        val pos = p * (n - 1)
-        val lower = pos.toInt()
-        val upper = min(n - 1, lower + 1)
-        val weight = pos - lower
-        val value = sorted[lower] * (1.0 - weight) + sorted[upper] * weight
-        return value.toFloat()
-    }
 
     private fun unitVector(to: FloatArray, from: FloatArray): FloatArray {
         val dx = to[0] - from[0]

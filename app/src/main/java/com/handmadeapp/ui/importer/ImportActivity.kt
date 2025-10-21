@@ -657,6 +657,7 @@ class ImportActivity : AppCompatActivity() {
                     applyAdjustments()
                     tvStatus.text = "Предпросмотр готов. Можно запускать конвейер."
                     Log.i(TAG, "preview.built w=${bmp.width} h=${bmp.height}")
+                    autoStartIndexingIfReady("preview.ready")
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "import.decode.fail: ${t.message}", t)
@@ -874,6 +875,7 @@ class ImportActivity : AppCompatActivity() {
                     btnProcess.isEnabled = true
                     setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT && lastSampling != null)
                     updateIndexUiState()
+                    autoStartIndexingIfReady("pipeline.done")
                     Toast.makeText(this@ImportActivity, "Конвейер завершён", Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
@@ -1680,6 +1682,7 @@ class ImportActivity : AppCompatActivity() {
                     val previousPreview = indexPreviewBitmap
                     val previewForUi = indexPreview
                     indexPreviewBitmap = previewForUi
+                    autoStartIndexingIfReady("kneedle.done")
                     updatePalettePreview(finalPalette)
                     if (errorsForUi != null) {
                         residualErrors = errorsForUi
@@ -2381,6 +2384,43 @@ class ImportActivity : AppCompatActivity() {
         val reason: String,
         val emittedAt: Long,
     )
+
+    /**
+     * Автозапуск индекса S7, если всё готово.
+     * Пишет подробный лог, почему пропустили запуск.
+     */
+    private fun autoStartIndexingIfReady(trigger: String) {
+        val kReady = lastKneedle != null
+        val palReady = !lastPaletteColors.isNullOrEmpty()
+        val preReady = lastPreScale != null
+        val flagOn = FeatureFlags.S7_INDEX
+        val canRun = flagOn && !indexRunning && kReady && palReady && preReady
+        val reason = when {
+            canRun -> "ready"
+            !flagOn -> "flag_off"
+            indexRunning -> "index_running"
+            !kReady -> "missing_kneedle"
+            !palReady -> "missing_palette"
+            !preReady -> "missing_prescale"
+            else -> "unknown"
+        }
+        Logger.i(
+            "PALETTE", "s7.autorun.check",
+            mapOf(
+                "trigger" to trigger,
+                "indexRunning" to indexRunning,
+                "flag" to flagOn,
+                "kReady" to kReady,
+                "palReady" to palReady,
+                "preReady" to preReady,
+                "ready" to canRun,
+                "reason" to reason
+            )
+        )
+        if (canRun) {
+            startIndexingK()
+        }
+    }
 
     companion object {
         private const val TAG = "ImportActivity"

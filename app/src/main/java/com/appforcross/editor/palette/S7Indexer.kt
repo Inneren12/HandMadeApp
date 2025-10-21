@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Debug
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.appforcross.editor.config.FeatureFlags
@@ -112,6 +113,15 @@ object S7Indexer {
         sourceWidth: Int? = null,
         sourceHeight: Int? = null
     ): S7IndexResult {
+        // Гард: запуск S7 на главном потоке запрещён.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Logger.e(
+                "PALETTE",
+                "s7.guard",
+                mapOf("reason" to "run_on_main", "mode" to mode.name, "seed" to seed)
+            )
+            throw IllegalStateException("S7Indexer.run() must not be called on the main thread")
+        }
         S7ThreadGuard.assertBackground("s7.index.run")
         FeatureFlags.logIndexFlag()
         val totalStart = SystemClock.elapsedRealtime()

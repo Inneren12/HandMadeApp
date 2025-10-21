@@ -22,6 +22,7 @@ import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.min
 
 data class S7IndexStats(
     val kStar: Int,
@@ -170,8 +171,8 @@ object S7Indexer {
 
 
             val scheduler = S7TileScheduler(
-                width = width,
-                height = height,
+                imageWidth = width,
+                imageHeight = height,
                 tileWidth = tileSpec.width,
                 tileHeight = tileSpec.height,
                 overlap = S7IndexSpec.TILE_OVERLAP
@@ -189,7 +190,11 @@ object S7Indexer {
                 "float_planes" to workspace.floatPlaneCount
             )
             val baselineStartNs = System.nanoTime()
-            val baselineStartLog = LinkedHashMap(workspaceMetrics).apply { put("phase", "start") }
+            // Преобразуем значения в Any, чтобы можно было добавлять строковые/long поля
+            val baselineStartLog: MutableMap<String, Any> =
+                workspaceMetrics.mapValues { it.value as Any }.toMutableMap().apply {
+                    put("phase", "start")
+                }
             Logger.i("PALETTE", "s7.baseline", baselineStartLog)
 
             val startParams = linkedMapOf(
@@ -224,7 +229,7 @@ object S7Indexer {
             var assignMs = 0L
             var ditherMs = 0L
 
-            val zoneEntries = S7SamplingSpec.Zone.entries
+            val zoneEntries = S7SamplingSpec.Zone.entries.toTypedArray()
             val tileAggregates = Array(scheduler.tileCount) { TileAggregate() }
 
             val meanCost = try {
@@ -305,10 +310,11 @@ object S7Indexer {
             }
 
             val baselineDurationMs = (System.nanoTime() - baselineStartNs) / 1_000_000
-            val baselineEndLog = LinkedHashMap(workspaceMetrics).apply {
-                put("phase", "end")
-                put("duration_ms", baselineDurationMs)
-            }
+            val baselineEndLog: MutableMap<String, Any> =
+                workspaceMetrics.mapValues { it.value as Any }.toMutableMap().apply {
+                    put("phase", "end")
+                    put("duration_ms", baselineDurationMs)
+                }
             Logger.i("PALETTE", "s7.baseline", baselineEndLog)
 
             val topCounts = counts.withIndex()

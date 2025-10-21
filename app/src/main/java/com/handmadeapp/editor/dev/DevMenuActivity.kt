@@ -42,15 +42,23 @@ class DevMenuActivity : Activity() {
         val btnStage2 = findViewById<Button>(R.id.btnPickRunStage2)
         val btnStage3 = findViewById<Button>(R.id.btnPickAnalyzeStage3)
         val btnStage4 = findViewById<Button>(R.id.btnPickPresetStage4)
+        val swWatchdog = findViewById<Switch>(R.id.swWatchdog)
 
         scope.launch {
             swDebug.isChecked = DevPrefs.isDebug(this@DevMenuActivity).first()
+            swWatchdog.isChecked = DevPrefs.isWatchdogEnabled(this@DevMenuActivity).first()
         }
         swDebug.setOnCheckedChangeListener { _, checked ->
             scope.launch {
                 DevPrefs.setDebug(this@DevMenuActivity, checked)
                 Logger.setMinLevel(if (checked) LogLevel.DEBUG else LogLevel.INFO)
                 Toast.makeText(this@DevMenuActivity, "DEBUG logs: $checked", Toast.LENGTH_SHORT).show()
+            }
+        }
+        swWatchdog.setOnCheckedChangeListener { _, checked ->
+            scope.launch {
+                DevPrefs.setWatchdogEnabled(this@DevMenuActivity, checked)
+                Toast.makeText(this@DevMenuActivity, "Watchdog: $checked", Toast.LENGTH_SHORT).show()
             }
         }
 

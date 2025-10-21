@@ -1,7 +1,8 @@
 package com.handmadeapp.editor.dev
 
 import android.content.Context
-import androidx.datastore.preferences.core.Preferences
+import com.handmadeapp.BuildConfig
+import com.handmadeapp.logging.Logger
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
@@ -14,6 +15,7 @@ object DevPrefs {
 
     private object Keys {
         val DEBUG = booleanPreferencesKey("dev.debug")
+        val WATCHDOG = booleanPreferencesKey("dev.watchdog.enabled")
     }
 
     fun isDebug(ctx: Context): Flow<Boolean> =
@@ -23,5 +25,15 @@ object DevPrefs {
         ctx.dataStore.edit { prefs ->
             prefs[Keys.DEBUG] = value
         }
+    }
+
+    fun isWatchdogEnabled(ctx: Context): Flow<Boolean> =
+        ctx.dataStore.data.map { prefs -> prefs[Keys.WATCHDOG] ?: BuildConfig.DEBUG }
+
+    suspend fun setWatchdogEnabled(ctx: Context, value: Boolean) {
+        ctx.dataStore.edit { prefs ->
+            prefs[Keys.WATCHDOG] = value
+        }
+        Logger.i("WATCHDOG", "watchdog.toggle", mapOf("enabled" to value))
     }
 }

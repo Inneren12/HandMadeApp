@@ -30,6 +30,9 @@ import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.appforcross.editor.config.FeatureFlags
 import com.appforcross.editor.config.FeatureFlags.S7Flag
 import com.appforcross.editor.config.FeatureFlags.Source
@@ -65,7 +68,9 @@ import com.handmadeapp.prescale.PreScaleRunner
 import com.handmadeapp.R
 import com.handmadeapp.analysis.Masks
 import com.handmadeapp.diagnostics.DiagnosticsManager
+import com.handmadeapp.editor.dev.DevPrefs
 import com.handmadeapp.logging.Logger
+import com.handmadeapp.watchdog.MainThreadWatchdog
 import java.io.File
 import java.util.Locale
 import kotlin.math.cos
@@ -82,6 +87,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 /**
@@ -162,6 +168,7 @@ class ImportActivity : AppCompatActivity() {
     private var suppressIndexGridToggle = false
     private var suppressIndexCostToggle = false
     private var suppressFlagToggle = false
+    private val mainWatchdog = MainThreadWatchdog()
 
     private enum class OverlayMode { NONE, SAMPLING, RESIDUAL, SPREAD, INDEX }
 
@@ -204,6 +211,19 @@ class ImportActivity : AppCompatActivity() {
             S7Flag.PARALLEL_TILES to cbFlagParallelTiles
         )
         paletteStrip = findViewById(R.id.paletteStrip)
+
+        mainWatchdog.setMetadataProvider { buildWatchdogMetadata() }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                DevPrefs.isWatchdogEnabled(this@ImportActivity).collectLatest { enabled ->
+                    if (enabled) {
+                        mainWatchdog.start()
+                    } else {
+                        mainWatchdog.stop()
+                    }
+                }
+            }
+        }
 
         FeatureFlags.logFlagsOnce()
         setupFeatureFlagControls()
@@ -357,10 +377,16 @@ class ImportActivity : AppCompatActivity() {
         overlay.clearOverlay()
     }
 
+    override fun onStop() {
+        super.onStop()
+        mainWatchdog.stop()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         activityScope.cancel()
         s7Scope.cancel()
+        mainWatchdog.stop()
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -411,6 +437,21 @@ class ImportActivity : AppCompatActivity() {
             job.join()
             if (s7Job == null) break
         }
+    }
+
+    private fun buildWatchdogMetadata(): Map<String, Any?> {
+        val data = linkedMapOf<String, Any?>(
+            "active_task" to (s7JobName ?: "idle"),
+            "sampling_running" to samplingRunning,
+            "init_running" to initRunning,
+            "greedy_running" to greedyRunning,
+            "spread_running" to spreadRunning,
+            "kneedle_running" to kneedleRunning,
+            "index_running" to indexRunning
+        )
+        data["bitmap_loaded"] = baseBitmap != null
+        currentUri?.let { data["uri"] = it.toString() }
+        return data
     }
 
     private fun setupFeatureFlagControls() {

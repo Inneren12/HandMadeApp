@@ -1,5 +1,6 @@
 package com.appforcross.editor.palette.s7.dither
 
+import com.appforcross.editor.config.FeatureFlags
 import com.appforcross.editor.palette.s7.assign.S7AssignCache
 
 object S7DitherEngine {
@@ -11,6 +12,10 @@ object S7DitherEngine {
     private const val WEIGHT_DENOMINATOR = 16
 
     fun ditherTile(tileCtx: S7DitherTileContext, assignCache: S7AssignCache) {
+        if (!FeatureFlags.S7_DITHER_LINEBUFFERS_ENABLED) {
+            ditherTileWithoutLineBuffers(tileCtx, assignCache)
+            return
+        }
         val width = tileCtx.tileWidth
         val height = tileCtx.tileHeight
         val padding = tileCtx.padding
@@ -47,6 +52,54 @@ object S7DitherEngine {
             currentErrors = nextErrors
             nextErrors = tmp
             nextErrors.fill(0)
+        }
+    }
+
+    private fun ditherTileWithoutLineBuffers(tileCtx: S7DitherTileContext, assignCache: S7AssignCache) {
+        val width = tileCtx.tileWidth
+        val height = tileCtx.tileHeight
+        val padding = tileCtx.padding
+        val values = tileCtx.values
+        val output = tileCtx.output
+        val quantizer = tileCtx.quantizer
+        val bufferWidth = width + padding * 2
+        val errors = IntArray(bufferWidth * height)
+        var index = 0
+        for (y in 0 until height) {
+            val rowOffset = y * bufferWidth
+            val rowStart = rowOffset + padding
+            val rowEnd = rowStart + width - 1
+            for (x in 0 until width) {
+                val errorIndex = rowOffset + padding + x
+                val adjusted = values[index] + errors[errorIndex]
+                val quantized = quantizer.quantize(x, y, adjusted, assignCache)
+                output[index] = quantized
+                var error = adjusted - quantized
+                if (error > S7DitherSpec.SCALE) {
+                    error = S7DitherSpec.SCALE
+                } else if (error < -S7DitherSpec.SCALE) {
+                    error = -S7DitherSpec.SCALE
+                }
+                if (error != 0) {
+                    if (errorIndex + 1 <= rowEnd) {
+                        accumulate(errors, errorIndex + 1, error, WEIGHT_RIGHT)
+                    }
+                    if (y + 1 < height) {
+                        val nextRowOffset = (y + 1) * bufferWidth
+                        val downIndex = nextRowOffset + padding + x
+                        accumulate(errors, downIndex, error, WEIGHT_DOWN)
+                        val downLeftCol = x + padding - 1
+                        if (downLeftCol >= 0) {
+                            accumulate(errors, nextRowOffset + downLeftCol, error, WEIGHT_DOWN_LEFT)
+                        }
+                        val downRightCol = x + padding + 1
+                        if (downRightCol < bufferWidth) {
+                            accumulate(errors, nextRowOffset + downRightCol, error, WEIGHT_DOWN_RIGHT)
+                        }
+                    }
+                }
+                index++
+            }
         }
     }
 

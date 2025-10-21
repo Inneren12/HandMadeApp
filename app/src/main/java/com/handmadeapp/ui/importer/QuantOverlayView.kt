@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.util.AttributeSet
 import android.util.Size
 import android.view.View
+import com.appforcross.editor.config.FeatureFlags
 import com.appforcross.editor.palette.S7OverlayRenderer
 import com.appforcross.editor.palette.S7Sample
 import com.appforcross.editor.palette.S7SamplingResult
@@ -42,6 +43,14 @@ class QuantOverlayView @JvmOverloads constructor(
     private var indexCostBitmap: Bitmap? = null
     private var indexBpp: Int = 8
     private var mode: Mode = Mode.NONE
+    private var featureFlagStatuses: List<FeatureFlags.FlagStatus> = emptyList()
+    private val flagTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 12f * resources.displayMetrics.scaledDensity
+    }
+    private val flagBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
 
     init {
         setWillNotDraw(false)
@@ -213,6 +222,11 @@ class QuantOverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun setFeatureFlagStatus(statuses: List<FeatureFlags.FlagStatus>) {
+        featureFlagStatuses = statuses
+        invalidate()
+    }
+
     fun updateIndexOverlay(showGrid: Boolean, showCost: Boolean) {
         this.indexShowGrid = showGrid
         this.indexShowCost = showCost && indexCostBitmap != null
@@ -224,12 +238,21 @@ class QuantOverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val currentMode = mode
-        if (currentMode == Mode.NONE) return
-        val img = imageSize ?: return
+        if (currentMode == Mode.NONE) {
+            drawFeatureFlagBadges(canvas)
+            return
+        }
+        val img = imageSize ?: run {
+            drawFeatureFlagBadges(canvas)
+            return
+        }
 
         val viewW = width.toFloat()
         val viewH = height.toFloat()
-        if (viewW <= 0f || viewH <= 0f) return
+        if (viewW <= 0f || viewH <= 0f) {
+            drawFeatureFlagBadges(canvas)
+            return
+        }
 
         val scale = min(viewW / img.width.toFloat(), viewH / img.height.toFloat())
         val offsetX = (viewW - img.width * scale) / 2f
@@ -241,10 +264,14 @@ class QuantOverlayView @JvmOverloads constructor(
 
         if (currentMode == Mode.INDEX) {
             drawIndexOverlay(canvas, img.width, img.height, offsetX, offsetY, scale)
+            drawFeatureFlagBadges(canvas)
             return
         }
 
-        val data = sampling ?: return
+        val data = sampling ?: run {
+            drawFeatureFlagBadges(canvas)
+            return
+        }
 
         val mapper: (S7Sample) -> Pair<Float, Float> = { sample ->
             val x = offsetX + sample.x * scale
@@ -254,7 +281,10 @@ class QuantOverlayView @JvmOverloads constructor(
 
         when (currentMode) {
             Mode.SAMPLING -> {
-                if (!showHeat && !showPoints) return
+                if (!showHeat && !showPoints) {
+                    drawFeatureFlagBadges(canvas)
+                    return
+                }
                 S7OverlayRenderer.draw(
                     canvas = canvas,
                     sampling = data,
@@ -266,7 +296,10 @@ class QuantOverlayView @JvmOverloads constructor(
                 )
             }
             Mode.RESIDUAL -> {
-                val residual = residualErrors ?: return
+                val residual = residualErrors ?: run {
+                    drawFeatureFlagBadges(canvas)
+                    return
+                }
                 val residualRadius = max(18f * density, 36f * scale)
                 S7OverlayRenderer.drawResidualHeatmap(
                     canvas = canvas,
@@ -279,8 +312,14 @@ class QuantOverlayView @JvmOverloads constructor(
                 )
             }
             Mode.SPREAD_BEFORE -> {
-                val ambiguity = spreadAmbiguity ?: return
-                if (ambiguity.size != data.samples.size) return
+                val ambiguity = spreadAmbiguity ?: run {
+                    drawFeatureFlagBadges(canvas)
+                    return
+                }
+                if (ambiguity.size != data.samples.size) {
+                    drawFeatureFlagBadges(canvas)
+                    return
+                }
                 val radius = max(18f * density, 32f * scale)
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
                 val maxValue = spreadMaxAmbiguity.coerceAtLeast(1e-6f)
@@ -296,8 +335,14 @@ class QuantOverlayView @JvmOverloads constructor(
                 }
             }
             Mode.SPREAD_AFTER -> {
-                val affected = spreadAffected ?: return
-                if (affected.size != data.samples.size) return
+                val affected = spreadAffected ?: run {
+                    drawFeatureFlagBadges(canvas)
+                    return
+                }
+                if (affected.size != data.samples.size) {
+                    drawFeatureFlagBadges(canvas)
+                    return
+                }
                 val radius = max(18f * density, 32f * scale)
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
                 for (idx in data.samples.indices) {
@@ -314,6 +359,7 @@ class QuantOverlayView @JvmOverloads constructor(
             Mode.NONE -> return
             Mode.INDEX -> return
         }
+        drawFeatureFlagBadges(canvas)
     }
 
     private fun drawIndexOverlay(canvas: Canvas, imgW: Int, imgH: Int, offsetX: Float, offsetY: Float, scale: Float) {
@@ -340,5 +386,56 @@ class QuantOverlayView @JvmOverloads constructor(
                 canvas.drawLine(offsetX, py, offsetX + imgW * scale, py, paint)
             }
         }
+    }
+
+    private fun drawFeatureFlagBadges(canvas: Canvas) {
+        if (featureFlagStatuses.isEmpty()) return
+        val density = resources.displayMetrics.density
+        val margin = 8f * density
+        val padding = 6f * density
+        val radius = 8f * density
+        var y = margin
+        val textMetrics = flagTextPaint.fontMetrics
+        val textHeight = textMetrics.bottom - textMetrics.top
+        for (status in featureFlagStatuses) {
+            val text = badgeText(status)
+            val textWidth = flagTextPaint.measureText(text)
+            val boxWidth = textWidth + padding * 2f
+            val boxHeight = textHeight + padding * 2f
+            flagBackgroundPaint.color = if (status.enabled) {
+                Color.argb(170, 34, 139, 34)
+            } else {
+                Color.argb(170, 139, 34, 34)
+            }
+            val rect = RectF(margin, y, margin + boxWidth, y + boxHeight)
+            canvas.drawRoundRect(rect, radius, radius, flagBackgroundPaint)
+            val baseline = rect.top + padding - textMetrics.top
+            flagTextPaint.color = Color.WHITE
+            canvas.drawText(text, rect.left + padding, baseline, flagTextPaint)
+            y += boxHeight + margin * 0.6f
+        }
+    }
+
+    private fun badgeText(status: FeatureFlags.FlagStatus): String {
+        val stage = status.stage.badgeLabel()
+        val source = status.source.badgeLabel(status.overrideStage)
+        return if (source != null) {
+            "${status.flag.displayName}: $stage ($source)"
+        } else {
+            "${status.flag.displayName}: $stage"
+        }
+    }
+
+    private fun FeatureFlags.Stage.badgeLabel(): String = when (this) {
+        FeatureFlags.Stage.DISABLED -> "off"
+        FeatureFlags.Stage.CANARY -> "canary"
+        FeatureFlags.Stage.RAMP -> "ramp"
+        FeatureFlags.Stage.FULL -> "full"
+    }
+
+    private fun FeatureFlags.Source.badgeLabel(overrideStage: FeatureFlags.Stage?): String? = when (this) {
+        FeatureFlags.Source.DEFAULT -> "default"
+        FeatureFlags.Source.STORED -> "rollout"
+        FeatureFlags.Source.OVERRIDE -> overrideStage?.badgeLabel()?.let { "override $it" } ?: "override"
     }
 }

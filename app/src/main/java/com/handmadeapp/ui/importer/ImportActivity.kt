@@ -317,13 +317,12 @@ class ImportActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // Включаем отрисовку S7-оверлеев, когда активити видима
-        S7OverlayRenderer.setEnabled(true)
+
     }
 
     override fun onPause() {
         super.onPause()
         // Во время скрытия активити просто выключаем и чистим overlay на экране.
-        S7OverlayRenderer.setEnabled(false)
         overlay.isVisible = false
         overlay.clearOverlay()
     }

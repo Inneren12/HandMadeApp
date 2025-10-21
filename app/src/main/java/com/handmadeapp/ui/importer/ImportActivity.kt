@@ -35,6 +35,7 @@ import com.appforcross.editor.config.FeatureFlags.S7Flag
 import com.appforcross.editor.config.FeatureFlags.Source
 import com.appforcross.editor.config.FeatureFlags.Stage
 import com.appforcross.editor.palette.PaletteLogcat
+import com.appforcross.editor.palette.S7Dispatchers
 import com.appforcross.editor.palette.S7Greedy
 import com.appforcross.editor.palette.S7GreedyIo
 import com.appforcross.editor.palette.S7GreedyResult
@@ -103,7 +104,7 @@ class ImportActivity : AppCompatActivity() {
     // Debounce для плавной перекраски предпросмотра
     private val adjustDebouncer = Debouncer(90)
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val s7Scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
+    private val s7Scope = CoroutineScope(SupervisorJob() + S7Dispatchers.preview)
     private var s7Job: Job? = null
     private var s7JobName: String? = null
     private lateinit var btnInitK0: Button
@@ -929,8 +930,10 @@ class ImportActivity : AppCompatActivity() {
                 )
                 DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
-                        S7SamplingIo.writeJson(dir, sampling)
-                        S7SamplingIo.writeRoiHistogramPng(dir, sampling, bmp.width, bmp.height)
+                        withContext(S7Dispatchers.export) {
+                            S7SamplingIo.writeJson(dir, sampling)
+                            S7SamplingIo.writeRoiHistogramPng(dir, sampling, bmp.width, bmp.height)
+                        }
                     } catch (io: Throwable) {
                         Logger.w("PALETTE", "sampling.io.fail", mapOf("error" to (io.message ?: "io")))
                     }
@@ -1168,9 +1171,11 @@ class ImportActivity : AppCompatActivity() {
                 val result = S7Initializer.run(sampling, seed)
                 DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
-                        S7PaletteIo.writeInitJson(dir, result)
-                        S7PaletteIo.writeStripPng(dir, result)
-                        S7PaletteIo.writeRolesCsv(dir, result)
+                        withContext(S7Dispatchers.export) {
+                            S7PaletteIo.writeInitJson(dir, result)
+                            S7PaletteIo.writeStripPng(dir, result)
+                            S7PaletteIo.writeRolesCsv(dir, result)
+                        }
                     } catch (io: Throwable) {
                         Logger.w("PALETTE", "palette.io.fail", mapOf("error" to (io.message ?: "io")))
                     }
@@ -1251,20 +1256,22 @@ class ImportActivity : AppCompatActivity() {
 
                 DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
-                        S7GreedyIo.writeIterCsv(dir, result.iters)
-                        val k0 = init.colors.size
-                        if (k0 > 0) {
-                            S7GreedyIo.writePaletteSnapshot(dir, init.colors, k0)
-                        }
-                        val finalColors = result.colors
-                        val kFinal = finalColors.size
-                        val kMid = min(kFinal, k0 + min(4, kFinal - k0))
-                        if (kMid > k0) {
-                            S7GreedyIo.writePaletteSnapshot(dir, finalColors.take(kMid), kMid)
-                        }
-                        S7GreedyIo.writePaletteSnapshot(dir, finalColors, kFinal)
-                        residualBitmap?.let { bmp ->
-                            S7GreedyIo.writeResidualHeatmap(dir, bmp)
+                        withContext(S7Dispatchers.export) {
+                            S7GreedyIo.writeIterCsv(dir, result.iters)
+                            val k0 = init.colors.size
+                            if (k0 > 0) {
+                                S7GreedyIo.writePaletteSnapshot(dir, init.colors, k0)
+                            }
+                            val finalColors = result.colors
+                            val kFinal = finalColors.size
+                            val kMid = min(kFinal, k0 + min(4, kFinal - k0))
+                            if (kMid > k0) {
+                                S7GreedyIo.writePaletteSnapshot(dir, finalColors.take(kMid), kMid)
+                            }
+                            S7GreedyIo.writePaletteSnapshot(dir, finalColors, kFinal)
+                            residualBitmap?.let { bmp ->
+                                S7GreedyIo.writeResidualHeatmap(dir, bmp)
+                            }
                         }
                     } catch (io: Throwable) {
                         Logger.w("PALETTE", "greedy.io.fail", mapOf("error" to (io.message ?: "io")))
@@ -1368,24 +1375,26 @@ class ImportActivity : AppCompatActivity() {
 
                 DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
-                        S7Spread2OptIo.writeDistMatrixCsv(dir, colorsBefore, "before")
-                        S7Spread2OptIo.writeDistMatrixCsv(dir, result.colors, "after")
-                        S7Spread2OptIo.writeViolationsCsv(dir, result.violationsBefore, "before")
-                        S7Spread2OptIo.writeViolationsCsv(dir, result.violationsAfter, "after")
-                        S7Spread2OptIo.writePairFixesCsv(dir, result.pairFixes)
-                        S7Spread2OptIo.writePaletteStrip(dir, colorsBefore, "before")
-                        S7Spread2OptIo.writePaletteStrip(dir, result.colors, "after")
-                        val overlaySize = ensureOverlaySize()
-                        if (overlaySize != null && ambiguity != null) {
-                            beforeBitmap = createSpreadHeatmapBitmap(overlaySize, sampling, ambiguity, true)
-                            beforeBitmap?.let { bmp ->
-                                S7Spread2OptIo.writeAffectedHeatmap(dir, bmp, "before")
+                        withContext(S7Dispatchers.export) {
+                            S7Spread2OptIo.writeDistMatrixCsv(dir, colorsBefore, "before")
+                            S7Spread2OptIo.writeDistMatrixCsv(dir, result.colors, "after")
+                            S7Spread2OptIo.writeViolationsCsv(dir, result.violationsBefore, "before")
+                            S7Spread2OptIo.writeViolationsCsv(dir, result.violationsAfter, "after")
+                            S7Spread2OptIo.writePairFixesCsv(dir, result.pairFixes)
+                            S7Spread2OptIo.writePaletteStrip(dir, colorsBefore, "before")
+                            S7Spread2OptIo.writePaletteStrip(dir, result.colors, "after")
+                            val overlaySize = ensureOverlaySize()
+                            if (overlaySize != null && ambiguity != null) {
+                                beforeBitmap = createSpreadHeatmapBitmap(overlaySize, sampling, ambiguity, true)
+                                beforeBitmap?.let { bmp ->
+                                    S7Spread2OptIo.writeAffectedHeatmap(dir, bmp, "before")
+                                }
                             }
-                        }
-                        if (overlaySize != null && affected != null) {
-                            afterBitmap = createSpreadHeatmapBitmap(overlaySize, sampling, affected, false)
-                            afterBitmap?.let { bmp ->
-                                S7Spread2OptIo.writeAffectedHeatmap(dir, bmp, "after")
+                            if (overlaySize != null && affected != null) {
+                                afterBitmap = createSpreadHeatmapBitmap(overlaySize, sampling, affected, false)
+                                afterBitmap?.let { bmp ->
+                                    S7Spread2OptIo.writeAffectedHeatmap(dir, bmp, "after")
+                                }
                             }
                         }
                     } catch (io: Throwable) {
@@ -1512,15 +1521,17 @@ class ImportActivity : AppCompatActivity() {
                 }
                 DiagnosticsManager.currentSessionDir(this@ImportActivity)?.let { dir ->
                     try {
-                        S7KneedleIo.writeGainCsv(dir, result.rows)
-                        S7KneedleIo.writeKneedlePng(dir, result.rows, result.Kstar)
-                        S7KneedleIo.writeFinalPalette(dir, finalPalette, result.Kstar)
-                        PaletteLogcat.printFinalPalette(finalPalette, headN = 20)
-                        residualBitmap?.let { bmp ->
-                            S7KneedleIo.writeResidualHeatmap(dir, bmp, result.Kstar)
-                        }
-                        indexPreview?.let { bmp ->
-                            S7KneedleIo.writeIndexPreview(dir, bmp, result.Kstar)
+                        withContext(S7Dispatchers.export) {
+                            S7KneedleIo.writeGainCsv(dir, result.rows)
+                            S7KneedleIo.writeKneedlePng(dir, result.rows, result.Kstar)
+                            S7KneedleIo.writeFinalPalette(dir, finalPalette, result.Kstar)
+                            PaletteLogcat.printFinalPalette(finalPalette, headN = 20)
+                            residualBitmap?.let { bmp ->
+                                S7KneedleIo.writeResidualHeatmap(dir, bmp, result.Kstar)
+                            }
+                            indexPreview?.let { bmp ->
+                                S7KneedleIo.writeIndexPreview(dir, bmp, result.Kstar)
+                            }
                         }
                     } catch (io: Throwable) {
                         Logger.w("PALETTE", "kneedle.io.fail", mapOf("error" to (io.message ?: "io")))

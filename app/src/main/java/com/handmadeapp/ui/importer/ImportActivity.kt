@@ -61,14 +61,19 @@ import com.appforcross.editor.palette.S7Spread2OptResult
 import com.appforcross.editor.palette.S7Spread2OptSpec
 import com.appforcross.editor.palette.S7SpreadViolation
 import com.handmadeapp.analysis.Stage3Analyze
+import com.handmadeapp.color.ColorMgmt
 import com.handmadeapp.preset.Stage4Runner
 import com.handmadeapp.prescale.PreScaleRunner
 import com.handmadeapp.R
 import com.handmadeapp.analysis.Masks
 import com.handmadeapp.diagnostics.DiagnosticsManager
 import com.handmadeapp.logging.Logger
+import com.handmadeapp.quant.DitherBuffers
+import com.handmadeapp.quant.PaletteQuantBuffers
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Locale
+import kotlin.io.use
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
@@ -352,6 +357,7 @@ class ImportActivity : AppCompatActivity() {
         }
 
         updateIndexUiState()
+        scheduleWarmupIfNeeded()
     }
 
     override fun onResume() {
@@ -1941,6 +1947,152 @@ class ImportActivity : AppCompatActivity() {
 
     private fun degToRadDouble(value: Double): Double = value * Math.PI / 180.0
 
+    private fun scheduleWarmupIfNeeded() {
+        if (!FeatureFlags.S7_INDEX) return
+        if (!WARMUP_SCHEDULED.compareAndSet(false, true)) return
+
+        activityScope.launch(Dispatchers.Default) {
+            var status = "ok"
+            val start = SystemClock.elapsedRealtime()
+            try {
+                performWarmup(WARMUP_BITMAP_SIZE)
+            } catch (cancelled: CancellationException) {
+                status = "cancelled"
+                throw cancelled
+            } catch (t: Throwable) {
+                status = "error"
+                Logger.w(
+                    "PALETTE",
+                    "s7.warmup.fail",
+                    mapOf("error" to (t.message ?: t.toString()))
+                )
+            } finally {
+                val duration = SystemClock.elapsedRealtime() - start
+                Logger.i(
+                    "PALETTE",
+                    "s7.warmup.finish",
+                    mapOf("status" to status, "duration_ms" to duration)
+                )
+            }
+        }
+    }
+
+    private fun performWarmup(size: Int) {
+        val dummy = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        dummy.eraseColor(Color.rgb(0x7A, 0x88, 0x95))
+        val maskBitmaps = Array(6) {
+            Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+        }
+        val masks = Masks(
+            edge = maskBitmaps[0],
+            flat = maskBitmaps[1],
+            hiTexFine = maskBitmaps[2],
+            hiTexCoarse = maskBitmaps[3],
+            skin = maskBitmaps[4],
+            sky = maskBitmaps[5]
+        )
+        val palette = buildWarmupPalette()
+        val sampleCount = size * size
+        val tilesPerSide = max(1, size / 8)
+        val tileCount = max(1, tilesPerSide * tilesPerSide)
+
+        PaletteQuantBuffers.acquire(sampleCount, palette.size, tileCount).use { workspace ->
+            workspace.tileIndices.fill(0)
+            workspace.owners.fill(-1)
+            workspace.secondOwners.fill(-1)
+            workspace.d2min.fill(0f)
+            workspace.d2second.fill(0f)
+            workspace.errorPerTile.fill(0f)
+            workspace.weights.fill(0f)
+            workspace.riskWeights.fill(0f)
+            workspace.perColorImportance.fill(0.0)
+            workspace.invalidTiles.fill(false)
+        }
+        DitherBuffers.acquireLineWorkspace(size + 2).use { workspace ->
+            workspace.current.fill(0)
+            workspace.next.fill(0)
+        }
+        DitherBuffers.acquirePlaneWorkspace(sampleCount).use { workspace ->
+            workspace.errors.fill(0)
+        }
+
+        try {
+            val tier = S7SamplingSpec.detectDeviceTier(this@ImportActivity).key
+            val result = S7Indexer.run(
+                ctx = applicationContext,
+                preScaledImage = dummy,
+                masks = masks,
+                paletteK = palette,
+                seed = S7SamplingSpec.DEFAULT_SEED,
+                deviceTier = tier,
+                mode = S7Indexer.Mode.PREVIEW,
+                sourceWidth = size,
+                sourceHeight = size
+            )
+            cleanupWarmupArtifacts(result)
+        } finally {
+            dummy.recycle()
+            maskBitmaps.forEach { bitmap ->
+                if (!bitmap.isRecycled) {
+                    bitmap.recycle()
+                }
+            }
+        }
+    }
+
+    private fun buildWarmupPalette(): List<S7InitColor> {
+        val definitions = listOf(
+            Color.rgb(240, 205, 180) to S7InitSpec.PaletteZone.SKIN,
+            Color.rgb(140, 185, 255) to S7InitSpec.PaletteZone.SKY,
+            Color.rgb(45, 45, 45) to S7InitSpec.PaletteZone.EDGE,
+            Color.rgb(180, 120, 80) to S7InitSpec.PaletteZone.HITEX,
+            Color.rgb(160, 160, 160) to S7InitSpec.PaletteZone.FLAT,
+            Color.rgb(210, 210, 210) to S7InitSpec.PaletteZone.NEUTRAL,
+            Color.rgb(110, 150, 110) to S7InitSpec.PaletteZone.HITEX,
+            Color.rgb(220, 90, 90) to S7InitSpec.PaletteZone.EDGE
+        )
+        return definitions.map { (color, zone) ->
+            val okLab = srgbToOkLab(color)
+            S7InitColor(
+                okLab = okLab,
+                sRGB = color,
+                protected = false,
+                role = zone,
+                spreadMin = 0f,
+                clipped = false
+            )
+        }
+    }
+
+    private fun srgbToOkLab(color: Int): FloatArray {
+        val r = Color.red(color) / 255f
+        val g = Color.green(color) / 255f
+        val b = Color.blue(color) / 255f
+        val okLab = ColorMgmt.rgbLinearToOKLab(
+            ColorMgmt.srgbToLinear(r),
+            ColorMgmt.srgbToLinear(g),
+            ColorMgmt.srgbToLinear(b)
+        )
+        return floatArrayOf(okLab.L, okLab.a, okLab.b)
+    }
+
+    private fun cleanupWarmupArtifacts(result: S7IndexResult) {
+        safeDelete(result.indexPath)
+        safeDelete(result.previewPath)
+        safeDelete(result.legendCsvPath)
+        safeDelete(result.costHeatmapPath)
+    }
+
+    private fun safeDelete(path: String?) {
+        if (path.isNullOrEmpty()) return
+        runCatching {
+            val file = File(path)
+            if (file.exists()) {
+                file.delete()
+            }
+        }
+    }
+
     private fun violationIndices(violations: List<S7SpreadViolation>?): Set<Int>? {
         if (violations.isNullOrEmpty()) return null
         val set = mutableSetOf<Int>()
@@ -2000,5 +2152,7 @@ class ImportActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "ImportActivity"
         private const val RC_OPEN_IMAGE = 1001
+        private const val WARMUP_BITMAP_SIZE = 64
+        private val WARMUP_SCHEDULED = AtomicBoolean(false)
     }
 }

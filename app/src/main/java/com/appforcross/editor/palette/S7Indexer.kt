@@ -5,12 +5,14 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Log
 import com.appforcross.editor.config.FeatureFlags
+import com.appforcross.editor.palette.s7.S7WorkspacePool
 import com.handmadeapp.analysis.Masks
 import com.handmadeapp.diagnostics.DiagnosticsManager
 import com.handmadeapp.logging.Logger
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cbrt
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
@@ -62,290 +64,360 @@ object S7Indexer {
         val tileSpec = S7IndexSpec.tileForTier(deviceTier, width, height)
         val indexBpp = if (k <= 255) 8 else 16
         val bytesPerPixel = if (indexBpp == 8) 1 else 2
-        val indexData = ByteArray(total * bytesPerPixel)
-        val previewPixels = IntArray(total)
-        val assigned = IntArray(total) { -1 }
-        val counts = IntArray(k)
-        val costs = DoubleArray(total)
 
-        val paletteLabs = Array(k) { DoubleArray(3) }
-        val paletteHues = DoubleArray(k)
-        val paletteRoles = Array(k) { paletteK[it].role }
-        val paletteColors = IntArray(k)
-        for (i in 0 until k) {
-            val lab = paletteK[i].okLab
-            paletteLabs[i][0] = lab[0].toDouble()
-            paletteLabs[i][1] = lab[1].toDouble()
-            paletteLabs[i][2] = lab[2].toDouble()
-            paletteHues[i] = atan2(lab[2].toDouble(), lab[1].toDouble())
-            paletteRoles[i] = paletteK[i].role
-            paletteColors[i] = paletteK[i].sRGB
-        }
+        return S7WorkspacePool.acquire(total, k, bytesPerPixel).use { workspace ->
+            val indexBuffer = workspace.indexBuffer
+            val indexData = workspace.indexBytes
+            val previewPixels = IntArray(total)
+            val assigned = IntArray(total) { -1 }
+            val counts = IntArray(k)
+            val costs = workspace.costPlane
 
-        val lPlane = DoubleArray(total)
-        val aPlane = DoubleArray(total)
-        val bPlane = DoubleArray(total)
-        val huePlane = DoubleArray(total)
-        val row = IntArray(width)
-        for (y in 0 until height) {
-            preScaledImage.getPixels(row, 0, width, 0, y, width, 1)
-            var idx = y * width
-            for (x in 0 until width) {
-                val argb = row[x]
-                val ok = argbToOklab(argb)
-                lPlane[idx] = ok[0].toDouble()
-                aPlane[idx] = ok[1].toDouble()
-                bPlane[idx] = ok[2].toDouble()
-                huePlane[idx] = atan2(ok[2].toDouble(), ok[1].toDouble())
-                idx++
+            val paletteLab = workspace.paletteLabData
+            val paletteHues = workspace.paletteHueData
+            val paletteRoles = ByteArray(k)
+            val paletteColors = IntArray(k)
+            for (i in 0 until k) {
+                val lab = paletteK[i].okLab
+                val base = i * 3
+                paletteLab[base] = lab[0].toDouble()
+                paletteLab[base + 1] = lab[1].toDouble()
+                paletteLab[base + 2] = lab[2].toDouble()
+                paletteHues[i] = atan2(lab[2].toDouble(), lab[1].toDouble())
+                paletteRoles[i] = paletteK[i].role.ordinal.toByte()
+                paletteColors[i] = paletteK[i].sRGB
             }
-        }
 
-        val edgeMask = bitmapToFloatArray(masks.edge, width, height)
-        val flatMask = bitmapToFloatArray(masks.flat, width, height)
-        val hiTexFineMask = bitmapToFloatArray(masks.hiTexFine, width, height)
-        val hiTexCoarseMask = bitmapToFloatArray(masks.hiTexCoarse, width, height)
-        val skinMask = bitmapToFloatArray(masks.skin, width, height)
-        val skyMask = bitmapToFloatArray(masks.sky, width, height)
-
-        val zones = Array(total) { S7SamplingSpec.Zone.FLAT }
-        for (idx in 0 until total) {
-            zones[idx] = resolveZone(
-                idx,
-                edgeMask,
-                flatMask,
-                hiTexFineMask,
-                hiTexCoarseMask,
-                skinMask,
-                skyMask
-            )
-        }
-
-        val startParams = linkedMapOf(
-            "algo" to S7IndexSpec.ALGO_VERSION,
-            "Kstar" to k,
-            "alpha0" to S7IndexSpec.ALPHA0,
-            "beta_fz" to S7IndexSpec.BETA_FZ,
-            "beta_edge" to S7IndexSpec.BETA_EDGE,
-            "beta_skin" to S7IndexSpec.BETA_SKIN,
-            "beta_coh" to S7IndexSpec.BETA_COH,
-            "tau_h_deg" to S7IndexSpec.TAU_H_DEG,
-            "tile_w" to tileSpec.width,
-            "tile_h" to tileSpec.height,
-            "tile_overlap" to S7IndexSpec.TILE_OVERLAP,
-            "seed" to seed,
-            "device_tier" to deviceTier,
-            "index_bpp" to indexBpp
-        )
-        Logger.i("PALETTE", "index.start", startParams)
-
-        val startTime = System.currentTimeMillis()
-        var sumCost = 0.0
-        var sumEb = 0.0
-        var sumCoh = 0.0
-        var foreignHits = 0
-
-        val meanCost = try {
-            val tileStart = System.currentTimeMillis()
+            val lPlane = workspace.lPlane
+            val aPlane = workspace.aPlane
+            val bPlane = workspace.bPlane
+            val huePlane = workspace.huePlane
+            val row = IntArray(width)
             for (y in 0 until height) {
-                val yOffset = y * width
+                preScaledImage.getPixels(row, 0, width, 0, y, width, 1)
+                var idx = y * width
                 for (x in 0 until width) {
-                    val idx = yOffset + x
-                    val zone = zones[idx]
-                    val L = lPlane[idx]
-                    val a = aPlane[idx]
-                    val b = bPlane[idx]
-                    val hue = huePlane[idx]
-                    val edge = edgeMask[idx].toDouble()
-
-                    val neighbors = neighborIndices(idx, x, y, width)
-
-                    var bestIdx = 0
-                    var bestCost = Double.POSITIVE_INFINITY
-                    var bestEb = 0.0
-                    var bestCoh = 0.0
-                    var bestFz = 0.0
-
-                    for (c in 0 until k) {
-                        val lab = paletteLabs[c]
-                        val deltaE = deltaE00(L, a, b, lab[0], lab[1], lab[2])
-                        val fz = foreignZonePenalty(zone, paletteRoles[c])
-                        val (eb, coh) = neighborPenalty(neighbors, assigned, c, edge)
-                        val sh = if (zone == S7SamplingSpec.Zone.SKIN) {
-                            val hueDelta = hueDeltaRad(hue, paletteHues[c])
-                            val excess = abs(hueDelta) - S7IndexSpec.TAU_H_RAD
-                            if (excess > 0.0) excess / Math.PI else 0.0
-                        } else {
-                            0.0
-                        }
-                        val cost = S7IndexSpec.ALPHA0 * deltaE +
-                            S7IndexSpec.BETA_FZ * fz +
-                            S7IndexSpec.BETA_EDGE * eb +
-                            S7IndexSpec.BETA_SKIN * sh -
-                            S7IndexSpec.BETA_COH * coh
-                        if (cost < bestCost || (cost == bestCost && c < bestIdx)) {
-                            bestCost = cost
-                            bestIdx = c
-                            bestEb = eb
-                            bestCoh = coh
-                            bestFz = fz
-                        }
-                    }
-
-                    assigned[idx] = bestIdx
-                    counts[bestIdx]++
-                    costs[idx] = bestCost
-                    sumCost += bestCost
-                    sumEb += bestEb
-                    sumCoh += bestCoh
-                    if (bestFz > 0.0) foreignHits++
-                    previewPixels[idx] = paletteColors[bestIdx]
-                    if (indexBpp == 8) {
-                        indexData[idx] = bestIdx.toByte()
-                    } else {
-                        val off = idx * 2
-                        indexData[off] = (bestIdx and 0xFF).toByte()
-                        indexData[off + 1] = ((bestIdx ushr 8) and 0xFF).toByte()
-                    }
+                    val argb = row[x]
+                    val rLin = srgbToLinearDouble(Color.red(argb) / 255.0)
+                    val gLin = srgbToLinearDouble(Color.green(argb) / 255.0)
+                    val bLin = srgbToLinearDouble(Color.blue(argb) / 255.0)
+                    val lVal = 0.4122214708 * rLin + 0.5363325363 * gLin + 0.0514459929 * bLin
+                    val mVal = 0.2119034982 * rLin + 0.6806995451 * gLin + 0.1073969566 * bLin
+                    val sVal = 0.0883024619 * rLin + 0.2817188376 * gLin + 0.6299787005 * bLin
+                    val lRoot = cbrt(lVal.coerceAtLeast(0.0))
+                    val mRoot = cbrt(mVal.coerceAtLeast(0.0))
+                    val sRoot = cbrt(sVal.coerceAtLeast(0.0))
+                    val L = 0.2104542553 * lRoot + 0.7936177850 * mRoot - 0.0040720468 * sRoot
+                    val A = 1.9779984951 * lRoot - 2.4285922050 * mRoot + 0.4505937099 * sRoot
+                    val B = 0.0259040371 * lRoot + 0.7827717662 * mRoot - 0.8086757660 * sRoot
+                    lPlane[idx] = L
+                    aPlane[idx] = A
+                    bPlane[idx] = B
+                    huePlane[idx] = atan2(B, A)
+                    idx++
                 }
             }
-            val tileTime = System.currentTimeMillis() - tileStart
-            val meanCost = if (total > 0) sumCost / total else 0.0
-            Logger.i(
-                "PALETTE",
-                "index.tile",
-                mapOf(
-                    "id" to 0,
-                    "x" to 0,
-                    "y" to 0,
-                    "w" to width,
-                    "h" to height,
-                    "ms" to tileTime,
-                    "meanCost" to meanCost,
-                    "EBsum" to sumEb,
-                    "COHsum" to sumCoh
-                )
-            )
-            meanCost
-        } catch (t: Throwable) {
-            Logger.e("PALETTE", "index.fail", mapOf("stage" to "assign", "error" to (t.message ?: t.toString())), err = t)
-            throw t
-        }
 
-        val topCounts = counts.withIndex()
-            .sortedByDescending { it.value }
-            .take(S7IndexSpec.COUNTS_TOP_N)
-            .map { mapOf("index" to it.index, "count" to it.value) }
+            val masksPlanes = workspace.masks
+            val edgeMask = masksPlanes[0]
+            val flatMask = masksPlanes[1]
+            val hiTexFineMask = masksPlanes[2]
+            val hiTexCoarseMask = masksPlanes[3]
+            val skinMask = masksPlanes[4]
+            val skyMask = masksPlanes[5]
 
-        Logger.i(
-            "PALETTE",
-            "index.assign",
-            mapOf(
-                "index_bpp" to indexBpp,
-                "counts_per_color_topN" to topCounts,
-                "foreign_zone_hits" to foreignHits,
-                "edge_break_penalty_sum" to sumEb,
-                "coh_bonus_sum" to sumCoh,
-                "mean_cost" to meanCost
-            )
-        )
+            bitmapToFloatArray(masks.edge, width, height, edgeMask)
+            bitmapToFloatArray(masks.flat, width, height, flatMask)
+            bitmapToFloatArray(masks.hiTexFine, width, height, hiTexFineMask)
+            bitmapToFloatArray(masks.hiTexCoarse, width, height, hiTexCoarseMask)
+            bitmapToFloatArray(masks.skin, width, height, skinMask)
+            bitmapToFloatArray(masks.sky, width, height, skyMask)
 
-        val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        previewBitmap.setPixels(previewPixels, 0, width, 0, 0, width, height)
-        val costHeatmapBitmap = createCostHeatmap(width, height, costs)
+            val zones = ByteArray(total)
+            for (idx in 0 until total) {
+                zones[idx] = resolveZoneOrdinal(
+                    idx,
+                    edgeMask,
+                    flatMask,
+                    hiTexFineMask,
+                    hiTexCoarseMask,
+                    skinMask,
+                    skyMask
+                ).toByte()
+            }
 
-        val sessionDir = DiagnosticsManager.currentSessionDir(ctx) ?: File(ctx.filesDir, "diag/index-temp").apply {
-            mkdirs()
-        }
-        val indexDir = File(sessionDir, "index").apply { mkdirs() }
-        val indexFile = File(indexDir, "index.bin")
-        val previewFile = File(indexDir, "index_preview_k$k.png")
-        val legendFile = File(indexDir, "palette_legend.csv")
-        val metaFile = File(indexDir, "index_meta.json")
-        val heatmapFile = File(indexDir, "cost_heatmap.png")
 
-        S7IndexIo.writeIndexBin(indexFile, width, height, k, indexBpp, indexData)
-        S7IndexIo.writeIndexPreviewPng(previewFile, previewBitmap)
-        S7IndexIo.writeLegendCsv(legendFile, paletteK)
-
-        val params = LinkedHashMap<String, Any?>(startParams)
-        val foreignFraction = if (total > 0) foreignHits.toDouble() / total.toDouble() else 0.0
-        if (foreignFraction >= S7IndexSpec.FOREIGN_ZONE_NOTE_FRACTION) {
-            params["note"] = "high_fz_hits"
-        }
-        val stats = S7IndexStats(
-            kStar = k,
-            countsPerColor = counts.copyOf(),
-            foreignZoneHits = foreignHits,
-            edgeBreakPenaltySum = sumEb,
-            cohBonusSum = sumCoh,
-            meanCost = meanCost,
-            timeMs = System.currentTimeMillis() - startTime,
-            params = params
-        )
-        S7IndexIo.writeIndexMetaJson(metaFile, stats)
-
-        val costHeatmapPath = if (costHeatmapBitmap != null) {
-            S7IndexIo.writeCostHeatmapPng(heatmapFile, costHeatmapBitmap)
-            heatmapFile.absolutePath
-        } else {
-            null
-        }
-
-        previewBitmap.recycle()
-        costHeatmapBitmap?.recycle()
-
-        Logger.i(
-            "PALETTE",
-            "index.done",
-            mapOf(
+            val workspaceMetrics = linkedMapOf(
                 "width" to width,
                 "height" to height,
-                "Kstar" to k,
-                "path_index" to indexFile.absolutePath,
-                "path_preview" to previewFile.absolutePath,
-                "time_ms" to stats.timeMs
+                "total" to total,
+                "k" to k,
+                "bytes_per_pixel" to bytesPerPixel,
+                "index_bytes" to indexBuffer.capacity(),
+                "double_planes" to workspace.doublePlaneCount,
+                "float_planes" to workspace.floatPlaneCount
             )
-        )
+            val baselineStartNs = System.nanoTime()
+            val baselineStartLog = LinkedHashMap(workspaceMetrics).apply { put("phase", "start") }
+            Logger.i("PALETTE", "s7.baseline", baselineStartLog)
 
-        Log.i("AiX/PALETTE", "Index built: K*=${paletteK.size}, index_bpp=$indexBpp")
+            val startParams = linkedMapOf(
+                "algo" to S7IndexSpec.ALGO_VERSION,
+                "Kstar" to k,
+                "alpha0" to S7IndexSpec.ALPHA0,
+                "beta_fz" to S7IndexSpec.BETA_FZ,
+                "beta_edge" to S7IndexSpec.BETA_EDGE,
+                "beta_skin" to S7IndexSpec.BETA_SKIN,
+                "beta_coh" to S7IndexSpec.BETA_COH,
+                "tau_h_deg" to S7IndexSpec.TAU_H_DEG,
+                "tile_w" to tileSpec.width,
+                "tile_h" to tileSpec.height,
+                "tile_overlap" to S7IndexSpec.TILE_OVERLAP,
+                "seed" to seed,
+                "device_tier" to deviceTier,
+                "index_bpp" to indexBpp
+            )
+            Logger.i("PALETTE", "index.start", startParams)
 
-        return S7IndexResult(
-            width = width,
-            height = height,
-            kStar = k,
-            indexBpp = indexBpp,
-            indexPath = indexFile.absolutePath,
-            previewPath = previewFile.absolutePath,
-            legendCsvPath = legendFile.absolutePath,
-            stats = stats,
-            costHeatmapPath = costHeatmapPath
-        )
+            val startTime = System.currentTimeMillis()
+            var sumCost = 0.0
+            var sumEb = 0.0
+            var sumCoh = 0.0
+            var foreignHits = 0
+
+            val zoneEntries = S7SamplingSpec.Zone.entries
+
+            val meanCost = try {
+                val tileStart = System.currentTimeMillis()
+                for (y in 0 until height) {
+                    val yOffset = y * width
+                    for (x in 0 until width) {
+                        val idx = yOffset + x
+                        val zone = zoneEntries[zones[idx].toInt()]
+                        val L = lPlane[idx]
+                        val a = aPlane[idx]
+                        val b = bPlane[idx]
+                        val hue = huePlane[idx]
+                        val edge = edgeMask[idx].toDouble()
+                        val leftAssigned = if (x > 0) assigned[idx - 1] else -1
+                        val topAssigned = if (y > 0) assigned[idx - width] else -1
+
+                        var bestIdx = 0
+                        var bestCost = Double.POSITIVE_INFINITY
+                        var bestEb = 0.0
+                        var bestCoh = 0.0
+                        var bestFz = 0.0
+
+                        for (c in 0 until k) {
+                            val base = c * 3
+                            val deltaE = deltaE00(
+                                L,
+                                a,
+                                b,
+                                paletteLab[base],
+                                paletteLab[base + 1],
+                                paletteLab[base + 2]
+                            )
+                            val fz = foreignZonePenalty(zone, paletteRoles[c].toInt())
+                            var matches = 0
+                            var mismatches = 0
+                            if (leftAssigned >= 0) {
+                                if (leftAssigned == c) matches++ else mismatches++
+                            }
+                            if (topAssigned >= 0) {
+                                if (topAssigned == c) matches++ else mismatches++
+                            }
+                            val denom = matches + mismatches
+                            val coh = if (denom > 0) matches.toDouble() / denom else 0.0
+                            val eb = if (denom > 0) edge * (mismatches.toDouble() / denom) else 0.0
+                            val sh = if (zone == S7SamplingSpec.Zone.SKIN) {
+                                val hueDelta = hueDeltaRad(hue, paletteHues[c])
+                                val excess = abs(hueDelta) - S7IndexSpec.TAU_H_RAD
+                                if (excess > 0.0) excess / Math.PI else 0.0
+                            } else {
+                                0.0
+                            }
+                            val cost = S7IndexSpec.ALPHA0 * deltaE +
+                                S7IndexSpec.BETA_FZ * fz +
+                                S7IndexSpec.BETA_EDGE * eb +
+                                S7IndexSpec.BETA_SKIN * sh -
+                                S7IndexSpec.BETA_COH * coh
+                            if (cost < bestCost || (cost == bestCost && c < bestIdx)) {
+                                bestCost = cost
+                                bestIdx = c
+                                bestEb = eb
+                                bestCoh = coh
+                                bestFz = fz
+                            }
+                        }
+
+                        assigned[idx] = bestIdx
+                        counts[bestIdx]++
+                        costs[idx] = bestCost
+                        sumCost += bestCost
+                        sumEb += bestEb
+                        sumCoh += bestCoh
+                        if (bestFz > 0.0) foreignHits++
+                        previewPixels[idx] = paletteColors[bestIdx]
+                        if (indexBpp == 8) {
+                            indexData[idx] = bestIdx.toByte()
+                        } else {
+                            val off = idx * 2
+                            indexData[off] = (bestIdx and 0xFF).toByte()
+                            indexData[off + 1] = ((bestIdx ushr 8) and 0xFF).toByte()
+                        }
+                    }
+                }
+                val tileTime = System.currentTimeMillis() - tileStart
+                val meanCostValue = if (total > 0) sumCost / total else 0.0
+                Logger.i(
+                    "PALETTE",
+                    "index.tile",
+                    mapOf(
+                        "id" to 0,
+                        "x" to 0,
+                        "y" to 0,
+                        "w" to width,
+                        "h" to height,
+                        "ms" to tileTime,
+                        "meanCost" to meanCostValue,
+                        "EBsum" to sumEb,
+                        "COHsum" to sumCoh
+                    )
+                )
+                meanCostValue
+            } catch (t: Throwable) {
+                Logger.e(
+                    "PALETTE",
+                    "index.fail",
+                    mapOf("stage" to "assign", "error" to (t.message ?: t.toString())),
+                    err = t
+                )
+                throw t
+            }
+
+            val baselineDurationMs = (System.nanoTime() - baselineStartNs) / 1_000_000
+            val baselineEndLog = LinkedHashMap(workspaceMetrics).apply {
+                put("phase", "end")
+                put("duration_ms", baselineDurationMs)
+            }
+            Logger.i("PALETTE", "s7.baseline", baselineEndLog)
+
+            val topCounts = counts.withIndex()
+                .sortedByDescending { it.value }
+                .take(S7IndexSpec.COUNTS_TOP_N)
+                .map { mapOf("index" to it.index, "count" to it.value) }
+
+            Logger.i(
+                "PALETTE",
+                "index.assign",
+                mapOf(
+                    "index_bpp" to indexBpp,
+                    "counts_per_color_topN" to topCounts,
+                    "foreign_zone_hits" to foreignHits,
+                    "edge_break_penalty_sum" to sumEb,
+                    "coh_bonus_sum" to sumCoh,
+                    "mean_cost" to meanCost
+                )
+            )
+
+            val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            previewBitmap.setPixels(previewPixels, 0, width, 0, 0, width, height)
+            val costHeatmapBitmap = createCostHeatmap(width, height, costs)
+
+            val sessionDir = DiagnosticsManager.currentSessionDir(ctx) ?: File(ctx.filesDir, "diag/index-temp").apply {
+                mkdirs()
+            }
+            val indexDir = File(sessionDir, "index").apply { mkdirs() }
+            val indexFile = File(indexDir, "index.bin")
+            val previewFile = File(indexDir, "index_preview_k$k.png")
+            val legendFile = File(indexDir, "palette_legend.csv")
+            val metaFile = File(indexDir, "index_meta.json")
+            val heatmapFile = File(indexDir, "cost_heatmap.png")
+
+            S7IndexIo.writeIndexBin(indexFile, width, height, k, indexBpp, indexData)
+            S7IndexIo.writeIndexPreviewPng(previewFile, previewBitmap)
+            S7IndexIo.writeLegendCsv(legendFile, paletteK)
+
+            val params = LinkedHashMap<String, Any?>(startParams)
+            params["workspace"] = workspaceMetrics
+            params["workspace_duration_ms"] = baselineDurationMs
+            val foreignFraction = if (total > 0) foreignHits.toDouble() / total.toDouble() else 0.0
+            if (foreignFraction >= S7IndexSpec.FOREIGN_ZONE_NOTE_FRACTION) {
+                params["note"] = "high_fz_hits"
+            }
+            val stats = S7IndexStats(
+                kStar = k,
+                countsPerColor = counts.copyOf(),
+                foreignZoneHits = foreignHits,
+                edgeBreakPenaltySum = sumEb,
+                cohBonusSum = sumCoh,
+                meanCost = meanCost,
+                timeMs = System.currentTimeMillis() - startTime,
+                params = params
+            )
+            S7IndexIo.writeIndexMetaJson(metaFile, stats)
+
+            val costHeatmapPath = if (costHeatmapBitmap != null) {
+                S7IndexIo.writeCostHeatmapPng(heatmapFile, costHeatmapBitmap)
+                heatmapFile.absolutePath
+            } else {
+                null
+            }
+
+            previewBitmap.recycle()
+            costHeatmapBitmap?.recycle()
+
+            Logger.i(
+                "PALETTE",
+                "index.done",
+                mapOf(
+                    "width" to width,
+                    "height" to height,
+                    "Kstar" to k,
+                    "path_index" to indexFile.absolutePath,
+                    "path_preview" to previewFile.absolutePath,
+                    "time_ms" to stats.timeMs
+                )
+            )
+
+            Log.i("AiX/PALETTE", "Index built: K*=${paletteK.size}, index_bpp=$indexBpp")
+
+            S7IndexResult(
+                width = width,
+                height = height,
+                kStar = k,
+                indexBpp = indexBpp,
+                indexPath = indexFile.absolutePath,
+                previewPath = previewFile.absolutePath,
+                legendCsvPath = legendFile.absolutePath,
+                stats = stats,
+                costHeatmapPath = costHeatmapPath
+            )
+        }
     }
-
-    private fun bitmapToFloatArray(bitmap: Bitmap, width: Int, height: Int): FloatArray {
+    private fun bitmapToFloatArray(bitmap: Bitmap, width: Int, height: Int, dest: FloatArray) {
+        require(dest.size >= width * height)
         val source = if (bitmap.width == width && bitmap.height == height) {
             bitmap
         } else {
             Bitmap.createScaledBitmap(bitmap, width, height, true)
         }
-        val arr = FloatArray(width * height)
         val row = IntArray(width)
         for (y in 0 until height) {
             source.getPixels(row, 0, width, 0, y, width, 1)
             var idx = y * width
             for (x in 0 until width) {
-                arr[idx] = Color.red(row[x]) / 255f
+                dest[idx] = Color.red(row[x]) / 255f
                 idx++
             }
         }
         if (source !== bitmap) {
             source.recycle()
         }
-        return arr
     }
 
-    private fun resolveZone(
+    private fun resolveZoneOrdinal(
         idx: Int,
         edgeMask: FloatArray,
         flatMask: FloatArray,
@@ -353,28 +425,29 @@ object S7Indexer {
         hiTexCoarseMask: FloatArray,
         skinMask: FloatArray,
         skyMask: FloatArray
-    ): S7SamplingSpec.Zone {
+    ): Int {
         val skin = skinMask[idx]
-        if (skin >= 0.55f) return S7SamplingSpec.Zone.SKIN
+        if (skin >= 0.55f) return S7SamplingSpec.Zone.SKIN.ordinal
         val sky = skyMask[idx]
-        if (sky >= 0.55f) return S7SamplingSpec.Zone.SKY
+        if (sky >= 0.55f) return S7SamplingSpec.Zone.SKY.ordinal
         val edge = edgeMask[idx]
-        if (edge >= 0.35f) return S7SamplingSpec.Zone.EDGE
+        if (edge >= 0.35f) return S7SamplingSpec.Zone.EDGE.ordinal
         val hiTex = max(hiTexFineMask[idx], hiTexCoarseMask[idx])
-        if (hiTex >= 0.45f) return S7SamplingSpec.Zone.HITEX
+        if (hiTex >= 0.45f) return S7SamplingSpec.Zone.HITEX.ordinal
         val flat = flatMask[idx]
         return if (flat >= 0.40f) {
-            S7SamplingSpec.Zone.FLAT
+            S7SamplingSpec.Zone.FLAT.ordinal
         } else {
             when {
-                hiTex >= 0.25f -> S7SamplingSpec.Zone.HITEX
-                edge >= 0.20f -> S7SamplingSpec.Zone.EDGE
-                else -> S7SamplingSpec.Zone.FLAT
+                hiTex >= 0.25f -> S7SamplingSpec.Zone.HITEX.ordinal
+                edge >= 0.20f -> S7SamplingSpec.Zone.EDGE.ordinal
+                else -> S7SamplingSpec.Zone.FLAT.ordinal
             }
         }
     }
 
-    private fun foreignZonePenalty(zone: S7SamplingSpec.Zone, role: S7InitSpec.PaletteZone): Double {
+    private fun foreignZonePenalty(zone: S7SamplingSpec.Zone, roleOrdinal: Int): Double {
+        val role = S7InitSpec.PaletteZone.entries[roleOrdinal]
         return when (zone) {
             S7SamplingSpec.Zone.SKIN -> if (role == S7InitSpec.PaletteZone.SKY) 1.5 else 0.0
             S7SamplingSpec.Zone.SKY -> if (role == S7InitSpec.PaletteZone.SKIN) 1.0 else 0.0
@@ -382,32 +455,6 @@ object S7Indexer {
             S7SamplingSpec.Zone.FLAT -> if (role == S7InitSpec.PaletteZone.EDGE) 0.7 else 0.0
             S7SamplingSpec.Zone.HITEX -> if (role == S7InitSpec.PaletteZone.FLAT) 0.4 else 0.0
         }
-    }
-
-    private fun neighborIndices(idx: Int, x: Int, y: Int, width: Int): IntArray {
-        val neighbors = IntArray(2)
-        var count = 0
-        if (x > 0) neighbors[count++] = idx - 1
-        if (y > 0) neighbors[count++] = idx - width
-        return neighbors.copyOf(count)
-    }
-
-    private fun neighborPenalty(neighbors: IntArray, assigned: IntArray, candidate: Int, edge: Double): Pair<Double, Double> {
-        if (neighbors.isEmpty()) return 0.0 to 0.0
-        var matches = 0
-        var mismatches = 0
-        for (idx in neighbors) {
-            if (idx < 0) continue
-            val current = assigned[idx]
-            if (current < 0) continue
-            if (current == candidate) matches++ else mismatches++
-        }
-        val denom = matches + mismatches
-        if (denom <= 0) return 0.0 to 0.0
-        val mismatchRate = mismatches.toDouble() / denom.toDouble()
-        val coh = matches.toDouble() / denom.toDouble()
-        val eb = edge * mismatchRate
-        return eb to coh
     }
 
     private fun deltaE00(L1: Double, a1: Double, b1: Double, L2: Double, a2: Double, b2: Double): Double {
@@ -474,32 +521,12 @@ object S7Indexer {
         return diff
     }
 
-    private fun argbToOklab(color: Int): FloatArray {
-        val r = srgbToLinear(Color.red(color) / 255f)
-        val g = srgbToLinear(Color.green(color) / 255f)
-        val b = srgbToLinear(Color.blue(color) / 255f)
-        val l = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b
-        val m = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b
-        val s = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b
-        val lRoot = cbrt(l)
-        val mRoot = cbrt(m)
-        val sRoot = cbrt(s)
-        val L = 0.2104542553f * lRoot + 0.7936177850f * mRoot - 0.0040720468f * sRoot
-        val A = 1.9779984951f * lRoot - 2.4285922050f * mRoot + 0.4505937099f * sRoot
-        val B = 0.0259040371f * lRoot + 0.7827717662f * mRoot - 0.8086757660f * sRoot
-        return floatArrayOf(L, A, B)
-    }
-
-    private fun srgbToLinear(value: Float): Float {
-        return if (value <= 0.04045f) {
-            value / 12.92f
+    private fun srgbToLinearDouble(value: Double): Double {
+        return if (value <= 0.04045) {
+            value / 12.92
         } else {
-            ((value + 0.055f) / 1.055f).pow(2.4f)
+            ((value + 0.055) / 1.055).pow(2.4)
         }
-    }
-
-    private fun cbrt(value: Float): Float {
-        return if (value <= 0f) 0f else kotlin.math.cbrt(value.toDouble()).toFloat()
     }
 
     private fun createCostHeatmap(width: Int, height: Int, costs: DoubleArray): Bitmap? {

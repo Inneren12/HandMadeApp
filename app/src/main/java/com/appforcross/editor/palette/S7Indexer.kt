@@ -12,6 +12,7 @@ import com.appforcross.editor.palette.s7.tiles.S7TileScheduler
 import com.handmadeapp.analysis.Masks
 import com.handmadeapp.diagnostics.DiagnosticsManager
 import com.handmadeapp.logging.Logger
+import com.handmadeapp.quant.LosProfiler
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -157,108 +158,117 @@ object S7Indexer {
             )
         )
 
-        return S7WorkspacePool.acquire(total, k, bytesPerPixel).use { workspace ->
-            S7ThreadGuard.assertBackground("s7.index.prepare")
-            val indexBuffer = workspace.indexBuffer
-            val indexData = workspace.indexBytes
-            val previewPixels = IntArray(total)
-            val assigned = IntArray(total) { -1 }
-            val counts = IntArray(k)
-            val costs = workspace.costPlane
+        validateMaskDimensions(masks, width, height)
 
-            val paletteLab = workspace.paletteLabData
-            val paletteHues = workspace.paletteHueData
-            val paletteRoles = ByteArray(k)
-            val paletteColors = IntArray(k)
-            for (i in 0 until k) {
-                val lab = paletteK[i].okLab
-                val base = i * 3
-                paletteLab[base] = lab[0].toDouble()
-                paletteLab[base + 1] = lab[1].toDouble()
-                paletteLab[base + 2] = lab[2].toDouble()
-                paletteHues[i] = atan2(lab[2].toDouble(), lab[1].toDouble())
-                paletteRoles[i] = paletteK[i].role.ordinal.toByte()
-                paletteColors[i] = paletteK[i].sRGB
-            }
+        return S7WorkspacePool.acquire(width, height, k, bytesPerPixel).use { workspace ->
+            try {
+                S7ThreadGuard.assertBackground("s7.index.prepare")
+                val indexBuffer = workspace.indexBuffer
+                val indexData = workspace.indexBytes
+                val previewPixels = workspace.preview
+                previewPixels.fill(0)
+                val assigned = workspace.assignedOwners
+                assigned.fill(-1)
+                val counts = workspace.countsBuffer
+                counts.fill(0)
+                val costs = workspace.costPlane
 
-            val lPlane = workspace.lPlane
-            val aPlane = workspace.aPlane
-            val bPlane = workspace.bPlane
-            val huePlane = workspace.huePlane
-            val row = IntArray(width)
-            for (y in 0 until height) {
-                preScaledImage.getPixels(row, 0, width, 0, y, width, 1)
-                var idx = y * width
-                for (x in 0 until width) {
-                    val argb = row[x]
-                    val rLin = srgbToLinearDouble(Color.red(argb) / 255.0)
-                    val gLin = srgbToLinearDouble(Color.green(argb) / 255.0)
-                    val bLin = srgbToLinearDouble(Color.blue(argb) / 255.0)
-                    val lVal = 0.4122214708 * rLin + 0.5363325363 * gLin + 0.0514459929 * bLin
-                    val mVal = 0.2119034982 * rLin + 0.6806995451 * gLin + 0.1073969566 * bLin
-                    val sVal = 0.0883024619 * rLin + 0.2817188376 * gLin + 0.6299787005 * bLin
-                    val lRoot = cbrt(lVal.coerceAtLeast(0.0))
-                    val mRoot = cbrt(mVal.coerceAtLeast(0.0))
-                    val sRoot = cbrt(sVal.coerceAtLeast(0.0))
-                    val L = 0.2104542553 * lRoot + 0.7936177850 * mRoot - 0.0040720468 * sRoot
-                    val A = 1.9779984951 * lRoot - 2.4285922050 * mRoot + 0.4505937099 * sRoot
-                    val B = 0.0259040371 * lRoot + 0.7827717662 * mRoot - 0.8086757660 * sRoot
-                    lPlane[idx] = L
-                    aPlane[idx] = A
-                    bPlane[idx] = B
-                    huePlane[idx] = atan2(B, A)
-                    idx++
+                val paletteLab = workspace.paletteLabData
+                val paletteHues = workspace.paletteHueData
+                val paletteRoles = workspace.paletteRolesBuffer
+                val paletteColors = workspace.paletteColorsBuffer
+                for (i in 0 until k) {
+                    val lab = paletteK[i].okLab
+                    val base = i * 3
+                    paletteLab[base] = lab[0].toDouble()
+                    paletteLab[base + 1] = lab[1].toDouble()
+                    paletteLab[base + 2] = lab[2].toDouble()
+                    paletteHues[i] = atan2(lab[2].toDouble(), lab[1].toDouble())
+                    paletteRoles[i] = paletteK[i].role.ordinal.toByte()
+                    paletteColors[i] = paletteK[i].sRGB
                 }
-            }
 
-            val masksPlanes = workspace.masks
-            val edgeMask = masksPlanes[0]
-            val flatMask = masksPlanes[1]
-            val hiTexFineMask = masksPlanes[2]
-            val hiTexCoarseMask = masksPlanes[3]
-            val skinMask = masksPlanes[4]
-            val skyMask = masksPlanes[5]
+                val lPlane = workspace.lPlane
+                val aPlane = workspace.aPlane
+                val bPlane = workspace.bPlane
+                val huePlane = workspace.huePlane
+                val row = workspace.rowBuffer
+                require(row.size >= width) { "Row buffer too small: ${row.size} < $width" }
+                for (y in 0 until height) {
+                    preScaledImage.getPixels(row, 0, width, 0, y, width, 1)
+                    var idx = y * width
+                    for (x in 0 until width) {
+                        val argb = row[x]
+                        val rLin = srgbToLinearDouble(Color.red(argb) / 255.0)
+                        val gLin = srgbToLinearDouble(Color.green(argb) / 255.0)
+                        val bLin = srgbToLinearDouble(Color.blue(argb) / 255.0)
+                        val lVal = 0.4122214708 * rLin + 0.5363325363 * gLin + 0.0514459929 * bLin
+                        val mVal = 0.2119034982 * rLin + 0.6806995451 * gLin + 0.1073969566 * bLin
+                        val sVal = 0.0883024619 * rLin + 0.2817188376 * gLin + 0.6299787005 * bLin
+                        val lRoot = cbrt(lVal.coerceAtLeast(0.0))
+                        val mRoot = cbrt(mVal.coerceAtLeast(0.0))
+                        val sRoot = cbrt(sVal.coerceAtLeast(0.0))
+                        val L = 0.2104542553 * lRoot + 0.7936177850 * mRoot - 0.0040720468 * sRoot
+                        val A = 1.9779984951 * lRoot - 2.4285922050 * mRoot + 0.4505937099 * sRoot
+                        val B = 0.0259040371 * lRoot + 0.7827717662 * mRoot - 0.8086757660 * sRoot
+                        lPlane[idx] = L
+                        aPlane[idx] = A
+                        bPlane[idx] = B
+                        huePlane[idx] = atan2(B, A)
+                        idx++
+                    }
+                }
 
-            bitmapToFloatArray(masks.edge, width, height, edgeMask)
-            bitmapToFloatArray(masks.flat, width, height, flatMask)
-            bitmapToFloatArray(masks.hiTexFine, width, height, hiTexFineMask)
-            bitmapToFloatArray(masks.hiTexCoarse, width, height, hiTexCoarseMask)
-            bitmapToFloatArray(masks.skin, width, height, skinMask)
-            bitmapToFloatArray(masks.sky, width, height, skyMask)
+                val masksPlanes = workspace.masks
+                val edgeMask = masksPlanes[0]
+                val flatMask = masksPlanes[1]
+                val hiTexFineMask = masksPlanes[2]
+                val hiTexCoarseMask = masksPlanes[3]
+                val skinMask = masksPlanes[4]
+                val skyMask = masksPlanes[5]
 
-            val zones = ByteArray(total)
-            for (idx in 0 until total) {
-                zones[idx] = resolveZoneOrdinal(
-                    idx,
-                    edgeMask,
-                    flatMask,
-                    hiTexFineMask,
-                    hiTexCoarseMask,
-                    skinMask,
-                    skyMask
-                ).toByte()
-            }
+                bitmapToFloatArray(masks.edge, width, height, row, edgeMask)
+                bitmapToFloatArray(masks.flat, width, height, row, flatMask)
+                bitmapToFloatArray(masks.hiTexFine, width, height, row, hiTexFineMask)
+                bitmapToFloatArray(masks.hiTexCoarse, width, height, row, hiTexCoarseMask)
+                bitmapToFloatArray(masks.skin, width, height, row, skinMask)
+                bitmapToFloatArray(masks.sky, width, height, row, skyMask)
 
+                val zones = workspace.zonesBuffer
+                for (idx in 0 until total) {
+                    zones[idx] = resolveZoneOrdinal(
+                        idx,
+                        edgeMask,
+                        flatMask,
+                        hiTexFineMask,
+                        hiTexCoarseMask,
+                        skinMask,
+                        skyMask
+                    ).toByte()
+                }
 
-            val scheduler = S7TileScheduler(
-                imageWidth = width,
-                imageHeight = height,
-                tileWidth = tileSpec.width,
-                tileHeight = tileSpec.height,
-                overlap = S7IndexSpec.TILE_OVERLAP
-            )
-            val workerCount = computeWorkerCount(scheduler.tileCount)
+                val scheduler = S7TileScheduler(
+                    imageWidth = width,
+                    imageHeight = height,
+                    tileWidth = tileSpec.width,
+                    tileHeight = tileSpec.height,
+                    overlap = S7IndexSpec.TILE_OVERLAP
+                )
+                val workerCount = computeWorkerCount(scheduler.tileCount)
 
-            val workspaceMetrics = linkedMapOf(
-                "width" to width,
-                "height" to height,
-                "total" to total,
-                "k" to k,
-                "bytes_per_pixel" to bytesPerPixel,
-                "index_bytes" to indexBuffer.capacity(),
-                "double_planes" to workspace.doublePlaneCount,
-                "float_planes" to workspace.floatPlaneCount
-            )
+                val workspaceMetrics = linkedMapOf(
+                    "width" to width,
+                    "height" to height,
+                    "total" to total,
+                    "k" to k,
+                    "bytes_per_pixel" to bytesPerPixel,
+                    "index_bytes" to indexBuffer.capacity(),
+                    "double_planes" to workspace.doublePlaneCount,
+                    "float_planes" to workspace.floatPlaneCount,
+                    "int_planes" to workspace.intPlaneCount,
+                    "byte_planes" to workspace.bytePlaneCount,
+                    "pooling" to workspace.poolingEnabled
+                )
             val baselineStartNs = System.nanoTime()
             // Преобразуем значения в Any, чтобы можно было добавлять строковые/long поля
             val baselineStartLog: MutableMap<String, Any> =
@@ -506,38 +516,57 @@ object S7Indexer {
 
             Log.i("AiX/PALETTE", "Index built: K*=${paletteK.size}, index_bpp=$indexBpp")
 
-            S7IndexResult(
-                width = width,
-                height = height,
-                kStar = k,
-                indexBpp = indexBpp,
-                indexPath = indexFile.absolutePath,
-                previewPath = previewFile.absolutePath,
-                legendCsvPath = legendFile.absolutePath,
-                stats = stats,
-                costHeatmapPath = costHeatmapPath,
-                gateConfig = gateConfig
-            )
+                S7IndexResult(
+                    width = width,
+                    height = height,
+                    kStar = k,
+                    indexBpp = indexBpp,
+                    indexPath = indexFile.absolutePath,
+                    previewPath = previewFile.absolutePath,
+                    legendCsvPath = legendFile.absolutePath,
+                    stats = stats,
+                    costHeatmapPath = costHeatmapPath,
+                    gateConfig = gateConfig
+                )
+            } finally {
+                LosProfiler.snapshotAndReset()
+            }
         }
     }
-    private fun bitmapToFloatArray(bitmap: Bitmap, width: Int, height: Int, dest: FloatArray) {
-        require(dest.size >= width * height)
-        val source = if (bitmap.width == width && bitmap.height == height) {
-            bitmap
-        } else {
-            Bitmap.createScaledBitmap(bitmap, width, height, true)
+    private fun bitmapToFloatArray(
+        bitmap: Bitmap,
+        width: Int,
+        height: Int,
+        row: IntArray,
+        dest: FloatArray
+    ) {
+        require(dest.size >= width * height) { "Dest capacity ${dest.size} < ${width * height}" }
+        require(bitmap.width == width && bitmap.height == height) {
+            "Mask dimensions ${bitmap.width}x${bitmap.height} mismatch expected ${width}x${height}"
         }
-        val row = IntArray(width)
+        require(row.size >= width) { "Row buffer too small: ${row.size} < $width" }
         for (y in 0 until height) {
-            source.getPixels(row, 0, width, 0, y, width, 1)
+            bitmap.getPixels(row, 0, width, 0, y, width, 1)
             var idx = y * width
             for (x in 0 until width) {
                 dest[idx] = Color.red(row[x]) / 255f
                 idx++
             }
         }
-        if (source !== bitmap) {
-            source.recycle()
+    }
+
+    private fun validateMaskDimensions(masks: Masks, width: Int, height: Int) {
+        checkMask("edge", masks.edge, width, height)
+        checkMask("flat", masks.flat, width, height)
+        checkMask("hiTexFine", masks.hiTexFine, width, height)
+        checkMask("hiTexCoarse", masks.hiTexCoarse, width, height)
+        checkMask("skin", masks.skin, width, height)
+        checkMask("sky", masks.sky, width, height)
+    }
+
+    private fun checkMask(name: String, mask: Bitmap, width: Int, height: Int) {
+        require(mask.width == width && mask.height == height) {
+            "$name mask dimensions ${mask.width}x${mask.height} mismatch expected ${width}x${height}"
         }
     }
 

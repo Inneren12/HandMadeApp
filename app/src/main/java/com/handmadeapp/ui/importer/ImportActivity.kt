@@ -507,9 +507,17 @@ class ImportActivity : AppCompatActivity() {
                         append(stats.foreignZoneHits)
                         append(", EBsum=")
                         append(String.format(Locale.US, "%.3f", stats.edgeBreakPenaltySum))
-                        append(", time=")
-                        append(stats.timeMs)
-                        append("ms")
+                        append(", t_ms={prep=")
+                        append(stats.prepareMs)
+                        append(", assign=")
+                        append(stats.assignMs)
+                        append(", dither=")
+                        append(stats.ditherMs)
+                        append(", total=")
+                        append(stats.totalMs)
+                        append("}")
+                        append(", gates=")
+                        append(result.gateConfig.summary())
                     }
                     tvStatus.text = status
                 }

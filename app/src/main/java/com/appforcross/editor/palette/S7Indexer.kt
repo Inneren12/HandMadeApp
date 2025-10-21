@@ -3,6 +3,8 @@ package com.appforcross.editor.palette
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Debug
+import android.os.SystemClock
 import android.util.Log
 import com.appforcross.editor.config.FeatureFlags
 import com.appforcross.editor.palette.s7.S7WorkspacePool
@@ -29,6 +31,13 @@ data class S7IndexStats(
     val cohBonusSum: Double,
     val meanCost: Double,
     val timeMs: Long,
+    val prepareMs: Long,
+    val assignMs: Long,
+    val ditherMs: Long,
+    val totalMs: Long,
+    val distEvalsTotal: Long,
+    val ownerChanges: Long,
+    val tilesUpdated: Int,
     val params: Map<String, Any?>
 )
 
@@ -41,7 +50,8 @@ data class S7IndexResult(
     val previewPath: String,
     val legendCsvPath: String,
     val stats: S7IndexStats,
-    val costHeatmapPath: String?
+    val costHeatmapPath: String?,
+    val gateConfig: DiagnosticsManager.S7GateConfig
 )
 
 object S7Indexer {
@@ -55,6 +65,7 @@ object S7Indexer {
         deviceTier: String
     ): S7IndexResult {
         FeatureFlags.logIndexFlag()
+        val totalStart = SystemClock.elapsedRealtime()
         val width = preScaledImage.width
         val height = preScaledImage.height
         require(width > 0 && height > 0) { "Image is empty" }
@@ -65,6 +76,16 @@ object S7Indexer {
         val tileSpec = S7IndexSpec.tileForTier(deviceTier, width, height)
         val indexBpp = if (k <= 255) 8 else 16
         val bytesPerPixel = if (indexBpp == 8) 1 else 2
+
+        val gateConfig = DiagnosticsManager.loadS7GateConfig(ctx)
+        Logger.i(
+            "PALETTE",
+            "s7.gates",
+            mapOf(
+                "aa_mask" to gateConfig.aaMask,
+                "gates" to gateConfig.toParamMap()["gates"]
+            )
+        )
 
         return S7WorkspacePool.acquire(total, k, bytesPerPixel).use { workspace ->
             val indexBuffer = workspace.indexBuffer
@@ -187,22 +208,32 @@ object S7Indexer {
                 "workers" to workerCount,
                 "seed" to seed,
                 "device_tier" to deviceTier,
-                "index_bpp" to indexBpp
+                "index_bpp" to indexBpp,
+                "diag_gates" to gateConfig.toParamMap()
             )
             Logger.i("PALETTE", "index.start", startParams)
 
-            val startTime = System.currentTimeMillis()
             var sumCost = 0.0
             var sumEb = 0.0
             var sumCoh = 0.0
             var foreignHits = 0
+            var distEvalsTotal = 0L
+            var ownerChanges = 0L
+            var tilesUpdated = 0
+            var prepareMs = 0L
+            var assignMs = 0L
+            var ditherMs = 0L
 
             val zoneEntries = S7SamplingSpec.Zone.entries
             val tileAggregates = Array(scheduler.tileCount) { TileAggregate() }
 
             val meanCost = try {
+                val assignStart = SystemClock.elapsedRealtime()
+                prepareMs = assignStart - totalStart
+                val gcBeforeAssign = captureGc()
                 scheduler.forEachTile { tile ->
-                    val tileStart = System.currentTimeMillis()
+                    val tileStart = SystemClock.elapsedRealtime()
+                    tilesUpdated++
                     val tileAggregate = tileAggregates[tile.tileId]
                     var tileSumCost = 0.0
                     var tileSumEb = 0.0
@@ -274,7 +305,12 @@ object S7Indexer {
                                 }
                             }
 
+                            distEvalsTotal += k.toLong()
+                            val prevOwner = assigned[idx]
                             assigned[idx] = bestIdx
+                            if (bestIdx != prevOwner) {
+                                ownerChanges++
+                            }
                             counts[bestIdx]++
                             costs[idx] = bestCost
                             tileSumCost += bestCost
@@ -306,13 +342,17 @@ object S7Indexer {
                             "y" to tile.y,
                             "w" to tile.width,
                             "h" to tile.height,
-                            "ms" to (System.currentTimeMillis() - tileStart),
+                            "ms" to (SystemClock.elapsedRealtime() - tileStart),
                             "meanCost" to tileMeanCost,
                             "EBsum" to tileSumEb,
                             "COHsum" to tileSumCoh
                         )
                     )
                 }
+                val assignEnd = SystemClock.elapsedRealtime()
+                assignMs = assignEnd - assignStart
+                val gcAfterAssign = captureGc()
+                logGc("assign", gcBeforeAssign, gcAfterAssign)
                 scheduler.reduceTiles { tile ->
                     val aggregate = tileAggregates[tile.tileId]
                     sumCost += aggregate.sumCost
@@ -346,16 +386,23 @@ object S7Indexer {
             Logger.i(
                 "PALETTE",
                 "index.assign",
-                mapOf(
+                linkedMapOf(
                     "index_bpp" to indexBpp,
                     "counts_per_color_topN" to topCounts,
                     "foreign_zone_hits" to foreignHits,
                     "edge_break_penalty_sum" to sumEb,
                     "coh_bonus_sum" to sumCoh,
-                    "mean_cost" to meanCost
+                    "mean_cost" to meanCost,
+                    "prepare_ms" to prepareMs,
+                    "assign_ms" to assignMs,
+                    "dist_evals_total" to distEvalsTotal,
+                    "owner_changes" to ownerChanges,
+                    "tiles_updated" to tilesUpdated
                 )
             )
 
+            val ditherStart = SystemClock.elapsedRealtime()
+            val gcBeforeDither = captureGc()
             val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             previewBitmap.setPixels(previewPixels, 0, width, 0, 0, width, height)
             val costHeatmapBitmap = createCostHeatmap(width, height, costs)
@@ -374,9 +421,33 @@ object S7Indexer {
             S7IndexIo.writeIndexPreviewPng(previewFile, previewBitmap)
             S7IndexIo.writeLegendCsv(legendFile, paletteK)
 
+            val costHeatmapPath = if (costHeatmapBitmap != null) {
+                S7IndexIo.writeCostHeatmapPng(heatmapFile, costHeatmapBitmap)
+                heatmapFile.absolutePath
+            } else {
+                null
+            }
+
+            val ditherEnd = SystemClock.elapsedRealtime()
+            ditherMs = ditherEnd - ditherStart
+            val gcAfterDither = captureGc()
+            logGc("dither", gcBeforeDither, gcAfterDither)
+
+            val totalEnd = SystemClock.elapsedRealtime()
+            val totalMs = totalEnd - totalStart
+
             val params = LinkedHashMap<String, Any?>(startParams)
             params["workspace"] = workspaceMetrics
             params["workspace_duration_ms"] = baselineDurationMs
+            params["timings_ms"] = linkedMapOf(
+                "prepare" to prepareMs,
+                "assign" to assignMs,
+                "dither" to ditherMs,
+                "total" to totalMs
+            )
+            params["dist_evals_total"] = distEvalsTotal
+            params["owner_changes"] = ownerChanges
+            params["tiles_updated"] = tilesUpdated
             val foreignFraction = if (total > 0) foreignHits.toDouble() / total.toDouble() else 0.0
             if (foreignFraction >= S7IndexSpec.FOREIGN_ZONE_NOTE_FRACTION) {
                 params["note"] = "high_fz_hits"
@@ -388,17 +459,17 @@ object S7Indexer {
                 edgeBreakPenaltySum = sumEb,
                 cohBonusSum = sumCoh,
                 meanCost = meanCost,
-                timeMs = System.currentTimeMillis() - startTime,
+                timeMs = totalMs,
+                prepareMs = prepareMs,
+                assignMs = assignMs,
+                ditherMs = ditherMs,
+                totalMs = totalMs,
+                distEvalsTotal = distEvalsTotal,
+                ownerChanges = ownerChanges,
+                tilesUpdated = tilesUpdated,
                 params = params
             )
             S7IndexIo.writeIndexMetaJson(metaFile, stats)
-
-            val costHeatmapPath = if (costHeatmapBitmap != null) {
-                S7IndexIo.writeCostHeatmapPng(heatmapFile, costHeatmapBitmap)
-                heatmapFile.absolutePath
-            } else {
-                null
-            }
 
             previewBitmap.recycle()
             costHeatmapBitmap?.recycle()
@@ -406,13 +477,20 @@ object S7Indexer {
             Logger.i(
                 "PALETTE",
                 "index.done",
-                mapOf(
+                linkedMapOf(
                     "width" to width,
                     "height" to height,
                     "Kstar" to k,
                     "path_index" to indexFile.absolutePath,
                     "path_preview" to previewFile.absolutePath,
-                    "time_ms" to stats.timeMs
+                    "path_heatmap" to costHeatmapPath,
+                    "time_ms" to stats.totalMs,
+                    "prepare_ms" to stats.prepareMs,
+                    "assign_ms" to stats.assignMs,
+                    "dither_ms" to stats.ditherMs,
+                    "dist_evals_total" to stats.distEvalsTotal,
+                    "owner_changes" to stats.ownerChanges,
+                    "tiles_updated" to stats.tilesUpdated
                 )
             )
 
@@ -427,7 +505,8 @@ object S7Indexer {
                 previewPath = previewFile.absolutePath,
                 legendCsvPath = legendFile.absolutePath,
                 stats = stats,
-                costHeatmapPath = costHeatmapPath
+                costHeatmapPath = costHeatmapPath,
+                gateConfig = gateConfig
             )
         }
     }
@@ -457,6 +536,31 @@ object S7Indexer {
         val available = Runtime.getRuntime().availableProcessors()
         val filtered = if (available > 0) available else 1
         return max(1, min(filtered, tileCount))
+    }
+
+    private data class GcSnapshot(val alloc: Long, val freed: Long)
+
+    private fun captureGc(): GcSnapshot {
+        return GcSnapshot(
+            alloc = Debug.getGlobalAllocCount().toLong(),
+            freed = Debug.getGlobalFreedCount().toLong()
+        )
+    }
+
+    private fun logGc(phase: String, start: GcSnapshot, end: GcSnapshot) {
+        Logger.i(
+            "PALETTE",
+            "s7.gc",
+            linkedMapOf(
+                "phase" to phase,
+                "alloc_before" to start.alloc,
+                "alloc_after" to end.alloc,
+                "alloc_delta" to (end.alloc - start.alloc),
+                "freed_before" to start.freed,
+                "freed_after" to end.freed,
+                "freed_delta" to (end.freed - start.freed)
+            )
+        )
     }
 
     private class TileAggregate {

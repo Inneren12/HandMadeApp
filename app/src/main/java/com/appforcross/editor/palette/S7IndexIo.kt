@@ -70,6 +70,13 @@ object S7IndexIo {
         root.put("cohBonusSum", stats.cohBonusSum)
         root.put("meanCost", stats.meanCost)
         root.put("timeMs", stats.timeMs)
+        root.put("prepareMs", stats.prepareMs)
+        root.put("assignMs", stats.assignMs)
+        root.put("ditherMs", stats.ditherMs)
+        root.put("totalMs", stats.totalMs)
+        root.put("distEvalsTotal", stats.distEvalsTotal)
+        root.put("ownerChanges", stats.ownerChanges)
+        root.put("tilesUpdated", stats.tilesUpdated)
         val counts = JSONArray()
         stats.countsPerColor.forEach { counts.put(it) }
         root.put("countsPerColor", counts)

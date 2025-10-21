@@ -1,0 +1,4 @@
+Lcom/appforcross/editor/palette/S7Indexer;
+Lcom/handmadeapp/quant/PaletteQuantBuffers;
+Lcom/appforcross/editor/palette/s7/dither/S7DitherEngine;
+Lcom/handmadeapp/quant/DitherBuffers;

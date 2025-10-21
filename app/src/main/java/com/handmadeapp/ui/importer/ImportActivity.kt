@@ -15,6 +15,7 @@ import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
 import android.util.Size
@@ -63,6 +64,7 @@ import com.appforcross.editor.palette.S7Spread2OptResult
 import com.appforcross.editor.palette.S7Spread2OptSpec
 import com.appforcross.editor.palette.S7SpreadViolation
 import com.handmadeapp.analysis.Stage3Analyze
+import com.handmadeapp.color.ColorMgmt
 import com.handmadeapp.preset.Stage4Runner
 import com.handmadeapp.prescale.PreScaleRunner
 import com.handmadeapp.R
@@ -70,9 +72,12 @@ import com.handmadeapp.analysis.Masks
 import com.handmadeapp.diagnostics.DiagnosticsManager
 import com.handmadeapp.editor.dev.DevPrefs
 import com.handmadeapp.logging.Logger
-import com.handmadeapp.watchdog.MainThreadWatchdog
+import com.handmadeapp.quant.DitherBuffers
+import com.handmadeapp.quant.PaletteQuantBuffers
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Locale
+import kotlin.io.use
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
@@ -87,9 +92,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.milliseconds
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
  * Реализовано без зависимостей на Activity Result API (для совместимости) — используем onActivityResult.
@@ -212,18 +222,8 @@ class ImportActivity : AppCompatActivity() {
         )
         paletteStrip = findViewById(R.id.paletteStrip)
 
-        mainWatchdog.setMetadataProvider { buildWatchdogMetadata() }
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                DevPrefs.isWatchdogEnabled(this@ImportActivity).collectLatest { enabled ->
-                    if (enabled) {
-                        mainWatchdog.start()
-                    } else {
-                        mainWatchdog.stop()
-                    }
-                }
-            }
-        }
+        observeProgressSignals()
+        setProgressVisible(false, "init")
 
         FeatureFlags.logFlagsOnce()
         setupFeatureFlagControls()
@@ -362,6 +362,7 @@ class ImportActivity : AppCompatActivity() {
         }
 
         updateIndexUiState()
+        scheduleWarmupIfNeeded()
     }
 
     override fun onResume() {
@@ -541,7 +542,7 @@ class ImportActivity : AppCompatActivity() {
     }
 
     private fun onImageChosen(uri: Uri) {
-        progress.isVisible = true
+        setProgressVisible(true, "preview.load.start")
         image.setImageDrawable(ColorDrawable(0xFF222222.toInt()))
         // Хардварный слой уменьшает лаги при применении ColorMatrix
         image.setLayerType(View.LAYER_TYPE_HARDWARE, null)
@@ -559,7 +560,7 @@ class ImportActivity : AppCompatActivity() {
                     overlayImageSize = Size(bmp.width, bmp.height)
                     resetSamplingState()
                     cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
-                    progress.isVisible = false
+                    setProgressVisible(false, "preview.load.done")
                     applyAdjustments()
                     tvStatus.text = "Предпросмотр готов. Можно запускать конвейер."
                     Log.i(TAG, "preview.built w=${bmp.width} h=${bmp.height}")
@@ -567,7 +568,7 @@ class ImportActivity : AppCompatActivity() {
             } catch (t: Throwable) {
                 Log.e(TAG, "import.decode.fail: ${t.message}", t)
                 withContext(Dispatchers.Main) {
-                    progress.isVisible = false
+                    setProgressVisible(false, "preview.load.fail")
                     tvStatus.text = "Ошибка загрузки: ${t.message}"
                     Toast.makeText(this@ImportActivity, "Ошибка загрузки: ${t.message}", Toast.LENGTH_LONG).show()
                 }
@@ -623,7 +624,7 @@ class ImportActivity : AppCompatActivity() {
         btnIndexK.isEnabled = false
         cbIndexGrid.isEnabled = false
         cbIndexCost.isEnabled = false
-        progress.isVisible = true
+        setProgressVisible(true, "s7.index.start")
         tvStatus.text = "S7.6: индексируем…"
         updateIndexUiState()
 
@@ -650,7 +651,7 @@ class ImportActivity : AppCompatActivity() {
                 }
                 withContext(Dispatchers.Main) {
                     indexRunning = false
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.index.done")
                     lastIndexResult = result
                     updateIndexUiState()
                     val previousPreview = indexPreviewBitmap
@@ -723,7 +724,7 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "index.fail", mapOf("stage" to "ui", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     indexRunning = false
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.index.fail")
                     tvStatus.text = "S7.6 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.6 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
@@ -743,7 +744,7 @@ class ImportActivity : AppCompatActivity() {
     /** Запуск основного конвейера: Stage3 → Stage4 → PreScale. Результат показываем в превью. */
     private fun runPipeline(uri: Uri, targetWst: Int) {
         tvStatus.text = "Запуск конвейера…"
-        progress.isVisible = true
+        setProgressVisible(true, "pipeline.start")
         btnProcess.isEnabled = false
         btnInitK0.isEnabled = false
 
@@ -776,7 +777,7 @@ class ImportActivity : AppCompatActivity() {
                     } else {
                         tvStatus.text = "Готово, но не удалось отобразить результат"
                     }
-                    progress.isVisible = false
+                    setProgressVisible(false, "pipeline.done")
                     btnProcess.isEnabled = true
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     updateIndexUiState()
@@ -786,7 +787,7 @@ class ImportActivity : AppCompatActivity() {
                 Log.e(TAG, "pipeline.fail: ${t.message}", t)
                 lastPreScale = null
                 withContext(Dispatchers.Main) {
-                    progress.isVisible = false
+                    setProgressVisible(false, "pipeline.fail")
                     btnProcess.isEnabled = true
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     tvStatus.text = "Ошибка конвейера: ${t.message}"
@@ -956,7 +957,7 @@ class ImportActivity : AppCompatActivity() {
         }
         samplingRunning = true
         cbSampling.isEnabled = false
-        progress.isVisible = true
+        setProgressVisible(true, "s7.sampling.start")
         tvStatus.text = "S7.1: считаем выборку…"
         btnInitK0.isEnabled = false
 
@@ -984,7 +985,7 @@ class ImportActivity : AppCompatActivity() {
                     val coverageState = if (coverageOk) "OK" else "низкое"
                     val hist = formatHistogram(sampling.roiHist)
                     tvStatus.text = "S7.1: ${sampling.samples.size} семплов • coverage=$coverageState • $hist • готово к S7.2"
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.sampling.done")
                     cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT
                     resetPaletteState()
@@ -1005,7 +1006,7 @@ class ImportActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     samplingRunning = false
                     overlayPending = false
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.sampling.fail")
                     cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
                     suppressSamplingToggle = true
@@ -1199,7 +1200,7 @@ class ImportActivity : AppCompatActivity() {
         btnInitK0.isEnabled = false
         cbPalette.isEnabled = false
         btnGrowK.isEnabled = false
-        progress.isVisible = true
+        setProgressVisible(true, "s7.init.start")
         tvStatus.text = "S7.2: инициализация палитры…"
 
         val seed = (sampling.params["seed"] as? Number)?.toLong() ?: S7InitSpec.DEFAULT_SEED
@@ -1224,7 +1225,7 @@ class ImportActivity : AppCompatActivity() {
                     lastPaletteColors = result.colors
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.init.done")
                     updatePalettePreview(result.colors)
                     val minSpread = result.colors.minOfOrNull { if (it.spreadMin.isInfinite()) Float.MAX_VALUE else it.spreadMin }
                     val spreadStr = if (minSpread == null || minSpread == Float.MAX_VALUE) "∞" else "%.2f".format(minSpread)
@@ -1238,7 +1239,7 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "init.fail", mapOf("stage" to "S7.2", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     initRunning = false
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.init.fail")
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT
                     tvStatus.text = "S7.2 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.2 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
@@ -1265,7 +1266,7 @@ class ImportActivity : AppCompatActivity() {
         greedyRunning = true
         btnGrowK.isEnabled = false
         btnSpread2Opt.isEnabled = false
-        progress.isVisible = true
+        setProgressVisible(true, "s7.greedy.start")
         tvStatus.text = "S7.3: рост палитры…"
 
         val seed = (init.params["seed"] as? Number)?.toLong()
@@ -1320,7 +1321,7 @@ class ImportActivity : AppCompatActivity() {
                     greedyRunning = false
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.greedy.done")
                     lastGreedy = result
                     lastPaletteColors = result.colors
                     if (errorsForUi != null) {
@@ -1359,7 +1360,7 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "greedy.fail", mapOf("stage" to "S7.3", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     greedyRunning = false
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.greedy.fail")
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastSpread != null
                     tvStatus.text = "S7.3 ошибка: ${t.message}"
@@ -1386,7 +1387,7 @@ class ImportActivity : AppCompatActivity() {
         val deviceTier = (sampling.params["device_tier"] as? String) ?: S7SamplingSpec.DeviceTier.MID.key
         spreadRunning = true
         btnSpread2Opt.isEnabled = false
-        progress.isVisible = true
+        setProgressVisible(true, "s7.spread.start")
         tvStatus.text = "S7.4: запускаем spread 2-opt…"
 
         launchS7Job("s7.spread2opt") {
@@ -1437,7 +1438,7 @@ class ImportActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     spreadRunning = false
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.spread.done")
                     btnFinalizeK.isVisible = FeatureFlags.S7_KNEEDLE
                     btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
                     lastSpread = result
@@ -1489,7 +1490,7 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "spread2opt.fail", mapOf("stage" to "S7.4", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     spreadRunning = false
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.spread.fail")
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
                     tvStatus.text = "S7.4 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.4 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
@@ -1523,7 +1524,7 @@ class ImportActivity : AppCompatActivity() {
         resetIndexState()
         kneedleRunning = true
         btnFinalizeK.isEnabled = false
-        progress.isVisible = true
+        setProgressVisible(true, "s7.kneedle.start")
         tvStatus.text = "S7.5: подбор K*…"
         val seed = (spread.params["seed"] as? Number)?.toLong()
             ?: (lastGreedy?.params?.get("seed") as? Number)?.toLong()
@@ -1571,7 +1572,7 @@ class ImportActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     kneedleRunning = false
                     btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.kneedle.done")
                     lastKneedle = result
                     val previousPreview = indexPreviewBitmap
                     val previewForUi = indexPreview
@@ -1659,7 +1660,7 @@ class ImportActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     kneedleRunning = false
                     btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
-                    progress.isVisible = false
+                    setProgressVisible(false, "s7.kneedle.fail")
                     tvStatus.text = "S7.5 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.5 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
@@ -1972,6 +1973,152 @@ class ImportActivity : AppCompatActivity() {
 
     private fun degToRadDouble(value: Double): Double = value * Math.PI / 180.0
 
+    private fun scheduleWarmupIfNeeded() {
+        if (!FeatureFlags.S7_INDEX) return
+        if (!WARMUP_SCHEDULED.compareAndSet(false, true)) return
+
+        activityScope.launch(Dispatchers.Default) {
+            var status = "ok"
+            val start = SystemClock.elapsedRealtime()
+            try {
+                performWarmup(WARMUP_BITMAP_SIZE)
+            } catch (cancelled: CancellationException) {
+                status = "cancelled"
+                throw cancelled
+            } catch (t: Throwable) {
+                status = "error"
+                Logger.w(
+                    "PALETTE",
+                    "s7.warmup.fail",
+                    mapOf("error" to (t.message ?: t.toString()))
+                )
+            } finally {
+                val duration = SystemClock.elapsedRealtime() - start
+                Logger.i(
+                    "PALETTE",
+                    "s7.warmup.finish",
+                    mapOf("status" to status, "duration_ms" to duration)
+                )
+            }
+        }
+    }
+
+    private fun performWarmup(size: Int) {
+        val dummy = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        dummy.eraseColor(Color.rgb(0x7A, 0x88, 0x95))
+        val maskBitmaps = Array(6) {
+            Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+        }
+        val masks = Masks(
+            edge = maskBitmaps[0],
+            flat = maskBitmaps[1],
+            hiTexFine = maskBitmaps[2],
+            hiTexCoarse = maskBitmaps[3],
+            skin = maskBitmaps[4],
+            sky = maskBitmaps[5]
+        )
+        val palette = buildWarmupPalette()
+        val sampleCount = size * size
+        val tilesPerSide = max(1, size / 8)
+        val tileCount = max(1, tilesPerSide * tilesPerSide)
+
+        PaletteQuantBuffers.acquire(sampleCount, palette.size, tileCount).use { workspace ->
+            workspace.tileIndices.fill(0)
+            workspace.owners.fill(-1)
+            workspace.secondOwners.fill(-1)
+            workspace.d2min.fill(0f)
+            workspace.d2second.fill(0f)
+            workspace.errorPerTile.fill(0f)
+            workspace.weights.fill(0f)
+            workspace.riskWeights.fill(0f)
+            workspace.perColorImportance.fill(0.0)
+            workspace.invalidTiles.fill(false)
+        }
+        DitherBuffers.acquireLineWorkspace(size + 2).use { workspace ->
+            workspace.current.fill(0)
+            workspace.next.fill(0)
+        }
+        DitherBuffers.acquirePlaneWorkspace(sampleCount).use { workspace ->
+            workspace.errors.fill(0)
+        }
+
+        try {
+            val tier = S7SamplingSpec.detectDeviceTier(this@ImportActivity).key
+            val result = S7Indexer.run(
+                ctx = applicationContext,
+                preScaledImage = dummy,
+                masks = masks,
+                paletteK = palette,
+                seed = S7SamplingSpec.DEFAULT_SEED,
+                deviceTier = tier,
+                mode = S7Indexer.Mode.PREVIEW,
+                sourceWidth = size,
+                sourceHeight = size
+            )
+            cleanupWarmupArtifacts(result)
+        } finally {
+            dummy.recycle()
+            maskBitmaps.forEach { bitmap ->
+                if (!bitmap.isRecycled) {
+                    bitmap.recycle()
+                }
+            }
+        }
+    }
+
+    private fun buildWarmupPalette(): List<S7InitColor> {
+        val definitions = listOf(
+            Color.rgb(240, 205, 180) to S7InitSpec.PaletteZone.SKIN,
+            Color.rgb(140, 185, 255) to S7InitSpec.PaletteZone.SKY,
+            Color.rgb(45, 45, 45) to S7InitSpec.PaletteZone.EDGE,
+            Color.rgb(180, 120, 80) to S7InitSpec.PaletteZone.HITEX,
+            Color.rgb(160, 160, 160) to S7InitSpec.PaletteZone.FLAT,
+            Color.rgb(210, 210, 210) to S7InitSpec.PaletteZone.NEUTRAL,
+            Color.rgb(110, 150, 110) to S7InitSpec.PaletteZone.HITEX,
+            Color.rgb(220, 90, 90) to S7InitSpec.PaletteZone.EDGE
+        )
+        return definitions.map { (color, zone) ->
+            val okLab = srgbToOkLab(color)
+            S7InitColor(
+                okLab = okLab,
+                sRGB = color,
+                protected = false,
+                role = zone,
+                spreadMin = 0f,
+                clipped = false
+            )
+        }
+    }
+
+    private fun srgbToOkLab(color: Int): FloatArray {
+        val r = Color.red(color) / 255f
+        val g = Color.green(color) / 255f
+        val b = Color.blue(color) / 255f
+        val okLab = ColorMgmt.rgbLinearToOKLab(
+            ColorMgmt.srgbToLinear(r),
+            ColorMgmt.srgbToLinear(g),
+            ColorMgmt.srgbToLinear(b)
+        )
+        return floatArrayOf(okLab.L, okLab.a, okLab.b)
+    }
+
+    private fun cleanupWarmupArtifacts(result: S7IndexResult) {
+        safeDelete(result.indexPath)
+        safeDelete(result.previewPath)
+        safeDelete(result.legendCsvPath)
+        safeDelete(result.costHeatmapPath)
+    }
+
+    private fun safeDelete(path: String?) {
+        if (path.isNullOrEmpty()) return
+        runCatching {
+            val file = File(path)
+            if (file.exists()) {
+                file.delete()
+            }
+        }
+    }
+
     private fun violationIndices(violations: List<S7SpreadViolation>?): Set<Int>? {
         if (violations.isNullOrEmpty()) return null
         val set = mutableSetOf<Int>()
@@ -1982,8 +2129,56 @@ class ImportActivity : AppCompatActivity() {
         return set
     }
 
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private fun observeProgressSignals() {
+        activityScope.launch {
+            var lastDispatchAt = 0L
+            progressSignals
+                .sample(50.milliseconds)
+                .distinctUntilChanged { old, new -> old.visible == new.visible }
+                .collect { signal ->
+                    val now = SystemClock.elapsedRealtime()
+                    val lag = (now - signal.emittedAt).coerceAtLeast(0L)
+                    val sincePrev = if (lastDispatchAt == 0L) null else now - lastDispatchAt
+                    progress.isVisible = signal.visible
+                    lastDispatchAt = now
+                    val data = mutableMapOf<String, Any?>(
+                        "visible" to signal.visible,
+                        "reason" to signal.reason,
+                        "lagMs" to lag
+                    )
+                    sincePrev?.let { data["sincePrevMs"] = it }
+                    Logger.throttle(
+                        cat = "UI",
+                        msg = "progress.flow.dispatch",
+                        intervalMs = sincePrev ?: lag,
+                        data = data
+                    )
+                }
+        }
+    }
+
+    private fun setProgressVisible(visible: Boolean, reason: String) {
+        val signal = ProgressSignal(visible = visible, reason = reason, emittedAt = SystemClock.elapsedRealtime())
+        if (!progressSignals.tryEmit(signal)) {
+            Logger.w(
+                "UI",
+                "progress.flow.drop",
+                mapOf("visible" to visible, "reason" to reason)
+            )
+        }
+    }
+
+    private data class ProgressSignal(
+        val visible: Boolean,
+        val reason: String,
+        val emittedAt: Long,
+    )
+
     companion object {
         private const val TAG = "ImportActivity"
         private const val RC_OPEN_IMAGE = 1001
+        private const val WARMUP_BITMAP_SIZE = 64
+        private val WARMUP_SCHEDULED = AtomicBoolean(false)
     }
 }

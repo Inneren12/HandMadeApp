@@ -64,6 +64,7 @@ object DitherBuffers {
     }
 
     private fun logHotAllocation(buffer: String, bytes: Long, reason: String, pooling: Boolean) {
+        LosProfiler.record(STAGE, buffer, bytes)
         Logger.i(
             "PALETTE",
             METRIC,

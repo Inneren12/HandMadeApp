@@ -15,6 +15,9 @@ import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
 import android.util.Size
@@ -83,6 +86,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
@@ -106,6 +110,13 @@ class ImportActivity : AppCompatActivity() {
     private val s7Scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
     private var s7Job: Job? = null
     private var s7JobName: String? = null
+    private val progressVisibilityThrottler = ThrottledUiUpdater(activityScope, UI_THROTTLE_MS)
+    private val palettePreviewThrottler = ThrottledUiUpdater(activityScope, UI_THROTTLE_MS)
+    private var desiredProgressVisible = false
+    private var pendingPaletteColors: List<S7InitColor>? = null
+    private val s7TriggerDesiredState = mutableMapOf<View, Boolean>()
+    private var s7JobActive = false
+    private val mainThreadBlockMonitor = MainThreadBlockMonitor()
     private lateinit var btnInitK0: Button
     private lateinit var btnGrowK: Button
     private lateinit var btnSpread2Opt: Button
@@ -208,20 +219,20 @@ class ImportActivity : AppCompatActivity() {
         FeatureFlags.logFlagsOnce()
         setupFeatureFlagControls()
         refreshFeatureFlagControls()
-        cbSampling.isEnabled = false
+        setS7TriggerEnabled(cbSampling, false)
         cbSampling.isChecked = false
         overlay.isVisible = false
         cbSampling.isVisible = FeatureFlags.S7_SAMPLING || FeatureFlags.S7_OVERLAY
         btnInitK0.isVisible = FeatureFlags.S7_INIT
-        btnInitK0.isEnabled = false
+        setS7TriggerEnabled(btnInitK0, false)
         btnGrowK.isVisible = FeatureFlags.S7_GREEDY
-        btnGrowK.isEnabled = false
+        setS7TriggerEnabled(btnGrowK, false)
         btnSpread2Opt.isVisible = FeatureFlags.S7_SPREAD2OPT
-        btnSpread2Opt.isEnabled = false
+        setS7TriggerEnabled(btnSpread2Opt, false)
         btnFinalizeK.isVisible = FeatureFlags.S7_KNEEDLE
-        btnFinalizeK.isEnabled = false
+        setS7TriggerEnabled(btnFinalizeK, false)
         btnIndexK.isVisible = FeatureFlags.S7_INDEX
-        btnIndexK.isEnabled = false
+        setS7TriggerEnabled(btnIndexK, false)
         cbPalette.isVisible = FeatureFlags.S7_INIT
         cbPalette.isEnabled = false
         cbPalette.isChecked = false
@@ -359,6 +370,7 @@ class ImportActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainThreadBlockMonitor.cancel()
         activityScope.cancel()
         s7Scope.cancel()
     }
@@ -376,13 +388,47 @@ class ImportActivity : AppCompatActivity() {
             previousJob.cancel(CancellationException("Superseded by $taskName"))
         }
 
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            onS7JobStarted(taskName)
+        } else {
+            activityScope.launch(Dispatchers.Main.immediate) { onS7JobStarted(taskName) }
+        }
+
         val job = s7Scope.launch {
+            val onMainThread = Looper.myLooper() == Looper.getMainLooper()
+            Logger.i(
+                "PALETTE",
+                "s7.job.dispatch",
+                mapOf(
+                    "task" to taskName,
+                    "thread" to Thread.currentThread().name,
+                    "onMain" to onMainThread,
+                    "cancelledPrev" to (previousJob != null)
+                )
+            )
+            if (onMainThread) {
+                Logger.w(
+                    "PALETTE",
+                    "s7.job.dispatch.warning",
+                    mapOf("task" to taskName, "issue" to "main_thread")
+                )
+            }
             Logger.i(
                 "PALETTE",
                 "s7.job.start",
                 mapOf("task" to taskName, "cancelledPrev" to (previousJob != null))
             )
-            block()
+            try {
+                block()
+            } finally {
+                if (onMainThread) {
+                    Logger.e(
+                        "PALETTE",
+                        "s7.job.dispatch.violation",
+                        mapOf("task" to taskName, "message" to "Executed on main thread")
+                    )
+                }
+            }
         }
         s7Job = job
         s7JobName = taskName
@@ -397,9 +443,49 @@ class ImportActivity : AppCompatActivity() {
                 "s7.job.finish",
                 mapOf("task" to taskName, "status" to completionStatus)
             )
-            if (s7Job === job) {
+            val isCurrent = s7Job === job
+            if (isCurrent) {
                 s7Job = null
                 s7JobName = null
+            }
+            activityScope.launch(Dispatchers.Main.immediate) {
+                onS7JobFinished(taskName, isCurrent)
+            }
+        }
+    }
+
+    private fun onS7JobStarted(taskName: String) {
+        mainThreadBlockMonitor.start(taskName)
+        if (!s7JobActive) {
+            s7JobActive = true
+            applyS7TriggerStates()
+        }
+    }
+
+    private fun onS7JobFinished(taskName: String, isCurrent: Boolean) {
+        mainThreadBlockMonitor.stop(taskName)
+        if (isCurrent) {
+            s7JobActive = false
+            applyS7TriggerStates()
+        }
+    }
+
+    private fun applyS7TriggerStates() {
+        s7TriggerDesiredState.forEach { (view, desired) ->
+            view.isEnabled = desired && !s7JobActive
+        }
+    }
+
+    private fun setS7TriggerEnabled(view: View, enabled: Boolean) {
+        s7TriggerDesiredState[view] = enabled
+        view.isEnabled = enabled && !s7JobActive
+    }
+
+    private fun setProgressVisible(visible: Boolean) {
+        desiredProgressVisible = visible
+        progressVisibilityThrottler.submit {
+            if (this@ImportActivity::progress.isInitialized) {
+                progress.isVisible = desiredProgressVisible
             }
         }
     }
@@ -500,7 +586,7 @@ class ImportActivity : AppCompatActivity() {
     }
 
     private fun onImageChosen(uri: Uri) {
-        progress.isVisible = true
+        setProgressVisible(true)
         image.setImageDrawable(ColorDrawable(0xFF222222.toInt()))
         // Хардварный слой уменьшает лаги при применении ColorMatrix
         image.setLayerType(View.LAYER_TYPE_HARDWARE, null)
@@ -508,7 +594,7 @@ class ImportActivity : AppCompatActivity() {
         tvStatus.text = "Загружаем превью…"
         currentUri = uri
         resetSamplingState()
-        cbSampling.isEnabled = false
+        setS7TriggerEnabled(cbSampling, false)
         activityScope.launch(Dispatchers.Default) {
             try {
                 val bmp = decodePreview(uri, maxDim = 2048)
@@ -517,8 +603,8 @@ class ImportActivity : AppCompatActivity() {
                     image.setImageBitmap(bmp)
                     overlayImageSize = Size(bmp.width, bmp.height)
                     resetSamplingState()
-                    cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
-                    progress.isVisible = false
+                    setS7TriggerEnabled(cbSampling, FeatureFlags.S7_SAMPLING)
+                    setProgressVisible(false)
                     applyAdjustments()
                     tvStatus.text = "Предпросмотр готов. Можно запускать конвейер."
                     Log.i(TAG, "preview.built w=${bmp.width} h=${bmp.height}")
@@ -526,7 +612,7 @@ class ImportActivity : AppCompatActivity() {
             } catch (t: Throwable) {
                 Log.e(TAG, "import.decode.fail: ${t.message}", t)
                 withContext(Dispatchers.Main) {
-                    progress.isVisible = false
+                    setProgressVisible(false)
                     tvStatus.text = "Ошибка загрузки: ${t.message}"
                     Toast.makeText(this@ImportActivity, "Ошибка загрузки: ${t.message}", Toast.LENGTH_LONG).show()
                 }
@@ -579,10 +665,10 @@ class ImportActivity : AppCompatActivity() {
         val tier = S7SamplingSpec.detectDeviceTier(this).key
 
         indexRunning = true
-        btnIndexK.isEnabled = false
+        setS7TriggerEnabled(btnIndexK, false)
         cbIndexGrid.isEnabled = false
         cbIndexCost.isEnabled = false
-        progress.isVisible = true
+        setProgressVisible(true)
         tvStatus.text = "S7.6: индексируем…"
         updateIndexUiState()
 
@@ -609,7 +695,7 @@ class ImportActivity : AppCompatActivity() {
                 }
                 withContext(Dispatchers.Main) {
                     indexRunning = false
-                    progress.isVisible = false
+                    setProgressVisible(false)
                     lastIndexResult = result
                     updateIndexUiState()
                     val previousPreview = indexPreviewBitmap
@@ -682,7 +768,7 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "index.fail", mapOf("stage" to "ui", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     indexRunning = false
-                    progress.isVisible = false
+                    setProgressVisible(false)
                     tvStatus.text = "S7.6 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.6 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
@@ -702,9 +788,9 @@ class ImportActivity : AppCompatActivity() {
     /** Запуск основного конвейера: Stage3 → Stage4 → PreScale. Результат показываем в превью. */
     private fun runPipeline(uri: Uri, targetWst: Int) {
         tvStatus.text = "Запуск конвейера…"
-        progress.isVisible = true
+        setProgressVisible(true)
         btnProcess.isEnabled = false
-        btnInitK0.isEnabled = false
+        setS7TriggerEnabled(btnInitK0, false)
 
         activityScope.launch(Dispatchers.Default) {
             try {
@@ -735,9 +821,9 @@ class ImportActivity : AppCompatActivity() {
                     } else {
                         tvStatus.text = "Готово, но не удалось отобразить результат"
                     }
-                    progress.isVisible = false
+                    setProgressVisible(false)
                     btnProcess.isEnabled = true
-                    btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
+                    setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT && lastSampling != null)
                     updateIndexUiState()
                     Toast.makeText(this@ImportActivity, "Конвейер завершён", Toast.LENGTH_SHORT).show()
                 }
@@ -745,9 +831,9 @@ class ImportActivity : AppCompatActivity() {
                 Log.e(TAG, "pipeline.fail: ${t.message}", t)
                 lastPreScale = null
                 withContext(Dispatchers.Main) {
-                    progress.isVisible = false
+                    setProgressVisible(false)
                     btnProcess.isEnabled = true
-                    btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
+                    setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT && lastSampling != null)
                     tvStatus.text = "Ошибка конвейера: ${t.message}"
                     Toast.makeText(this@ImportActivity, "Ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
@@ -885,13 +971,13 @@ class ImportActivity : AppCompatActivity() {
         suppressSamplingToggle = false
         overlay.isVisible = false
         overlay.clearOverlay()
-        btnSpread2Opt.isEnabled = false
+        setS7TriggerEnabled(btnSpread2Opt, false)
         suppressResidualToggle = true
         cbShowResidual.isChecked = false
         suppressResidualToggle = false
         cbShowResidual.isEnabled = false
         cbShowResidual.isVisible = false
-        btnFinalizeK.isEnabled = false
+        setS7TriggerEnabled(btnFinalizeK, false)
         resetIndexState()
         resetPaletteState()
     }
@@ -914,10 +1000,10 @@ class ImportActivity : AppCompatActivity() {
             overlayPending = showOverlayWhenDone
         }
         samplingRunning = true
-        cbSampling.isEnabled = false
-        progress.isVisible = true
+        setS7TriggerEnabled(cbSampling, false)
+        setProgressVisible(true)
         tvStatus.text = "S7.1: считаем выборку…"
-        btnInitK0.isEnabled = false
+        setS7TriggerEnabled(btnInitK0, false)
 
         launchS7Job("s7.sampling") {
             try {
@@ -943,9 +1029,9 @@ class ImportActivity : AppCompatActivity() {
                     val coverageState = if (coverageOk) "OK" else "низкое"
                     val hist = formatHistogram(sampling.roiHist)
                     tvStatus.text = "S7.1: ${sampling.samples.size} семплов • coverage=$coverageState • $hist • готово к S7.2"
-                    progress.isVisible = false
-                    cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
-                    btnInitK0.isEnabled = FeatureFlags.S7_INIT
+                    setProgressVisible(false)
+                    setS7TriggerEnabled(cbSampling, FeatureFlags.S7_SAMPLING)
+                    setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT)
                     resetPaletteState()
                     if (overlayPending && FeatureFlags.S7_OVERLAY) {
                         suppressSamplingToggle = true
@@ -964,9 +1050,9 @@ class ImportActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     samplingRunning = false
                     overlayPending = false
-                    progress.isVisible = false
-                    cbSampling.isEnabled = FeatureFlags.S7_SAMPLING
-                    btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null
+                    setProgressVisible(false)
+                    setS7TriggerEnabled(cbSampling, FeatureFlags.S7_SAMPLING)
+                    setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT && lastSampling != null)
                     suppressSamplingToggle = true
                     cbSampling.isChecked = false
                     suppressSamplingToggle = false
@@ -1155,10 +1241,10 @@ class ImportActivity : AppCompatActivity() {
             tvStatus.text = "S7.2: перезапуск…"
         }
         initRunning = true
-        btnInitK0.isEnabled = false
+        setS7TriggerEnabled(btnInitK0, false)
         cbPalette.isEnabled = false
-        btnGrowK.isEnabled = false
-        progress.isVisible = true
+        setS7TriggerEnabled(btnGrowK, false)
+        setProgressVisible(true)
         tvStatus.text = "S7.2: инициализация палитры…"
 
         val seed = (sampling.params["seed"] as? Number)?.toLong() ?: S7InitSpec.DEFAULT_SEED
@@ -1181,9 +1267,9 @@ class ImportActivity : AppCompatActivity() {
                     lastGreedy = null
                     residualErrors = null
                     lastPaletteColors = result.colors
-                    btnInitK0.isEnabled = FeatureFlags.S7_INIT
-                    btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
-                    progress.isVisible = false
+                    setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT)
+                    setS7TriggerEnabled(btnGrowK, FeatureFlags.S7_GREEDY)
+                    setProgressVisible(false)
                     updatePalettePreview(result.colors)
                     val minSpread = result.colors.minOfOrNull { if (it.spreadMin.isInfinite()) Float.MAX_VALUE else it.spreadMin }
                     val spreadStr = if (minSpread == null || minSpread == Float.MAX_VALUE) "∞" else "%.2f".format(minSpread)
@@ -1197,8 +1283,8 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "init.fail", mapOf("stage" to "S7.2", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     initRunning = false
-                    progress.isVisible = false
-                    btnInitK0.isEnabled = FeatureFlags.S7_INIT
+                    setProgressVisible(false)
+                    setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT)
                     tvStatus.text = "S7.2 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.2 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
@@ -1222,9 +1308,9 @@ class ImportActivity : AppCompatActivity() {
             tvStatus.text = "S7.3: перезапуск…"
         }
         greedyRunning = true
-        btnGrowK.isEnabled = false
-        btnSpread2Opt.isEnabled = false
-        progress.isVisible = true
+        setS7TriggerEnabled(btnGrowK, false)
+        setS7TriggerEnabled(btnSpread2Opt, false)
+        setProgressVisible(true)
         tvStatus.text = "S7.3: рост палитры…"
 
         val seed = (init.params["seed"] as? Number)?.toLong()
@@ -1277,9 +1363,9 @@ class ImportActivity : AppCompatActivity() {
 
                 withContext(Dispatchers.Main) {
                     greedyRunning = false
-                    btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
-                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
-                    progress.isVisible = false
+                    setS7TriggerEnabled(btnGrowK, FeatureFlags.S7_GREEDY)
+                    setS7TriggerEnabled(btnSpread2Opt, FeatureFlags.S7_SPREAD2OPT)
+                    setProgressVisible(false)
                     lastGreedy = result
                     lastPaletteColors = result.colors
                     if (errorsForUi != null) {
@@ -1318,9 +1404,9 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "greedy.fail", mapOf("stage" to "S7.3", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     greedyRunning = false
-                    progress.isVisible = false
-                    btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
-                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastSpread != null
+                    setProgressVisible(false)
+                    setS7TriggerEnabled(btnGrowK, FeatureFlags.S7_GREEDY)
+                    setS7TriggerEnabled(btnSpread2Opt, FeatureFlags.S7_SPREAD2OPT && lastSpread != null)
                     tvStatus.text = "S7.3 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.3 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
@@ -1344,8 +1430,8 @@ class ImportActivity : AppCompatActivity() {
         val seed = (greedy.params["seed"] as? Number)?.toLong() ?: S7SamplingSpec.DEFAULT_SEED
         val deviceTier = (sampling.params["device_tier"] as? String) ?: S7SamplingSpec.DeviceTier.MID.key
         spreadRunning = true
-        btnSpread2Opt.isEnabled = false
-        progress.isVisible = true
+        setS7TriggerEnabled(btnSpread2Opt, false)
+        setProgressVisible(true)
         tvStatus.text = "S7.4: запускаем spread 2-opt…"
 
         launchS7Job("s7.spread2opt") {
@@ -1395,10 +1481,10 @@ class ImportActivity : AppCompatActivity() {
 
                 withContext(Dispatchers.Main) {
                     spreadRunning = false
-                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
-                    progress.isVisible = false
+                    setS7TriggerEnabled(btnSpread2Opt, FeatureFlags.S7_SPREAD2OPT)
+                    setProgressVisible(false)
                     btnFinalizeK.isVisible = FeatureFlags.S7_KNEEDLE
-                    btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
+                    setS7TriggerEnabled(btnFinalizeK, FeatureFlags.S7_KNEEDLE)
                     lastSpread = result
                     paletteBeforeSpread = colorsBefore
                     spreadAmbiguity = ambiguity
@@ -1448,8 +1534,8 @@ class ImportActivity : AppCompatActivity() {
                 Logger.e("PALETTE", "spread2opt.fail", mapOf("stage" to "S7.4", "error" to (t.message ?: t.toString())), err = t)
                 withContext(Dispatchers.Main) {
                     spreadRunning = false
-                    progress.isVisible = false
-                    btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
+                    setProgressVisible(false)
+                    setS7TriggerEnabled(btnSpread2Opt, FeatureFlags.S7_SPREAD2OPT)
                     tvStatus.text = "S7.4 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.4 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                 }
@@ -1481,8 +1567,8 @@ class ImportActivity : AppCompatActivity() {
         val kTry = palette.size
         resetIndexState()
         kneedleRunning = true
-        btnFinalizeK.isEnabled = false
-        progress.isVisible = true
+        setS7TriggerEnabled(btnFinalizeK, false)
+        setProgressVisible(true)
         tvStatus.text = "S7.5: подбор K*…"
         val seed = (spread.params["seed"] as? Number)?.toLong()
             ?: (lastGreedy?.params?.get("seed") as? Number)?.toLong()
@@ -1529,8 +1615,8 @@ class ImportActivity : AppCompatActivity() {
                 val errorsForUi = errors
                 withContext(Dispatchers.Main) {
                     kneedleRunning = false
-                    btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
-                    progress.isVisible = false
+                    setS7TriggerEnabled(btnFinalizeK, FeatureFlags.S7_KNEEDLE)
+                    setProgressVisible(false)
                     lastKneedle = result
                     val previousPreview = indexPreviewBitmap
                     val previewForUi = indexPreview
@@ -1617,8 +1703,8 @@ class ImportActivity : AppCompatActivity() {
                 )
                 withContext(Dispatchers.Main) {
                     kneedleRunning = false
-                    btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
-                    progress.isVisible = false
+                    setS7TriggerEnabled(btnFinalizeK, FeatureFlags.S7_KNEEDLE)
+                    setProgressVisible(false)
                     tvStatus.text = "S7.5 ошибка: ${t.message}"
                     Toast.makeText(this@ImportActivity, "S7.5 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
                     updateIndexUiState()
@@ -1634,6 +1720,17 @@ class ImportActivity : AppCompatActivity() {
 
     private fun updatePalettePreview(colors: List<S7InitColor>) {
         lastPaletteColors = colors
+        pendingPaletteColors = colors
+        palettePreviewThrottler.submit {
+            val palette = pendingPaletteColors
+            if (palette != null) {
+                pendingPaletteColors = null
+                applyPalettePreview(palette)
+            }
+        }
+    }
+
+    private fun applyPalettePreview(colors: List<S7InitColor>) {
         paletteStrip.setPalette(colors)
         suppressPaletteToggle = true
         cbPalette.isChecked = true
@@ -1641,7 +1738,7 @@ class ImportActivity : AppCompatActivity() {
         cbPalette.isEnabled = true
         cbPalette.isVisible = FeatureFlags.S7_INIT
         paletteStrip.isVisible = true
-        btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastGreedy != null
+        setS7TriggerEnabled(btnSpread2Opt, FeatureFlags.S7_SPREAD2OPT && lastGreedy != null)
     }
 
     private fun resetIndexState() {
@@ -1671,10 +1768,103 @@ class ImportActivity : AppCompatActivity() {
         updateIndexUiState()
     }
 
+    private class ThrottledUiUpdater(
+        private val scope: CoroutineScope,
+        private val minIntervalMs: Long
+    ) {
+        private var lastExecutionTime = 0L
+        private var pendingJob: Job? = null
+
+        fun submit(block: suspend () -> Unit) {
+            val now = SystemClock.uptimeMillis()
+            val elapsed = now - lastExecutionTime
+            pendingJob?.cancel()
+            if (elapsed >= minIntervalMs) {
+                lastExecutionTime = now
+                pendingJob = scope.launch(Dispatchers.Main.immediate) {
+                    block()
+                }
+            } else {
+                val delayMs = minIntervalMs - elapsed
+                pendingJob = scope.launch(Dispatchers.Main.immediate) {
+                    delay(delayMs)
+                    lastExecutionTime = SystemClock.uptimeMillis()
+                    block()
+                }
+            }
+        }
+    }
+
+    private inner class MainThreadBlockMonitor {
+        private val handler = Handler(Looper.getMainLooper())
+        private var currentTask: String? = null
+        private var lastPostedAt = 0L
+        private var maxObservedDelay = 0L
+        private val checkRunnable = object : Runnable {
+            override fun run() {
+                val task = currentTask ?: return
+                val now = SystemClock.uptimeMillis()
+                val delta = now - lastPostedAt
+                if (delta > maxObservedDelay) {
+                    maxObservedDelay = delta
+                }
+                if (delta > MAIN_BLOCK_THRESHOLD_MS) {
+                    Logger.w(
+                        "PALETTE",
+                        "s7.monitor.block",
+                        mapOf("task" to task, "delayMs" to delta)
+                    )
+                }
+                if (currentTask == task) {
+                    lastPostedAt = now
+                    handler.postDelayed(this, MAIN_BLOCK_MONITOR_INTERVAL_MS)
+                }
+            }
+        }
+
+        fun start(taskName: String) {
+            handler.removeCallbacks(checkRunnable)
+            currentTask = taskName
+            lastPostedAt = SystemClock.uptimeMillis()
+            maxObservedDelay = 0L
+            handler.postDelayed(checkRunnable, MAIN_BLOCK_MONITOR_INTERVAL_MS)
+            Logger.i(
+                "PALETTE",
+                "s7.monitor.start",
+                mapOf("task" to taskName)
+            )
+        }
+
+        fun stop(taskName: String) {
+            if (currentTask != taskName) return
+            handler.removeCallbacks(checkRunnable)
+            val maxDelay = maxObservedDelay
+            Logger.i(
+                "PALETTE",
+                "s7.monitor.stop",
+                mapOf(
+                    "task" to taskName,
+                    "maxDelayMs" to maxDelay,
+                    "blocked" to (maxDelay > MAIN_BLOCK_THRESHOLD_MS)
+                )
+            )
+            currentTask = null
+            lastPostedAt = 0L
+            maxObservedDelay = 0L
+        }
+
+        fun cancel() {
+            handler.removeCallbacks(checkRunnable)
+            currentTask = null
+            lastPostedAt = 0L
+            maxObservedDelay = 0L
+        }
+    }
+
     private fun updateIndexUiState() {
         val canRun = FeatureFlags.S7_INDEX && lastKneedle != null && lastPreScale != null && !indexRunning
         btnIndexK.isVisible = FeatureFlags.S7_INDEX
-        btnIndexK.isEnabled = canRun
+        setS7TriggerEnabled(btnIndexK, canRun)
         val hasResult = lastIndexResult != null
         val costAvailable = indexCostHeatmapBitmap != null
         cbIndexGrid.isVisible = FeatureFlags.S7_INDEX && hasResult
@@ -1736,8 +1926,8 @@ class ImportActivity : AppCompatActivity() {
         suppressPaletteToggle = false
         cbPalette.isEnabled = false
         cbPalette.isVisible = FeatureFlags.S7_INIT && lastSampling != null
-        btnInitK0.isEnabled = FeatureFlags.S7_INIT && lastSampling != null && !samplingRunning
-        btnGrowK.isEnabled = false
+        setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT && lastSampling != null && !samplingRunning)
+        setS7TriggerEnabled(btnGrowK, false)
         lastSpread = null
         paletteBeforeSpread = null
         spreadAmbiguity = null
@@ -1748,8 +1938,8 @@ class ImportActivity : AppCompatActivity() {
         suppressSpreadToggle = false
         cbSpreadBeforeAfter.isEnabled = false
         cbSpreadBeforeAfter.isVisible = false
-        btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT && lastGreedy != null
-        btnFinalizeK.isEnabled = false
+        setS7TriggerEnabled(btnSpread2Opt, FeatureFlags.S7_SPREAD2OPT && lastGreedy != null)
+        setS7TriggerEnabled(btnFinalizeK, false)
         btnFinalizeK.isVisible = FeatureFlags.S7_KNEEDLE && lastSpread != null
         suppressResidualToggle = true
         cbShowResidual.isChecked = false
@@ -1944,5 +2134,8 @@ class ImportActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "ImportActivity"
         private const val RC_OPEN_IMAGE = 1001
+        private const val UI_THROTTLE_MS = 100L
+        private const val MAIN_BLOCK_MONITOR_INTERVAL_MS = 50L
+        private const val MAIN_BLOCK_THRESHOLD_MS = 150L
     }
 }

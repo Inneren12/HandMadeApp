@@ -15,6 +15,7 @@ import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.StrictMode
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
@@ -39,7 +40,7 @@ import com.appforcross.editor.config.FeatureFlags.S7Flag
 import com.appforcross.editor.config.FeatureFlags.Source
 import com.appforcross.editor.config.FeatureFlags.Stage
 import com.appforcross.editor.palette.PaletteLogcat
-import com.appforcross.editor.palette.S7Dispatchers
+import com.handmadeapp.BuildConfig
 import com.appforcross.editor.palette.S7Greedy
 import com.appforcross.editor.palette.S7GreedyIo
 import com.appforcross.editor.palette.S7GreedyResult
@@ -98,12 +99,13 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.sample
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration.Companion.milliseconds
 import android.os.Handler
 import android.os.Looper
+import com.handmadeapp.runtime.S7Dispatchers
 import com.handmadeapp.watchdog.MainThreadWatchdog
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
@@ -124,6 +126,7 @@ class ImportActivity : AppCompatActivity() {
     // Debounce для плавной перекраски предпросмотра
     private val adjustDebouncer = Debouncer(90)
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // Весь S7 уходим на отдельный однопоточный диспетчер (см. S7Dispatchers.preview).
     private val s7Scope = CoroutineScope(SupervisorJob() + S7Dispatchers.preview)
     private var s7Job: Job? = null
     private var s7JobName: String? = null
@@ -202,6 +205,17 @@ class ImportActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // В dev-сборках включаем StrictMode для отслеживания тяжёлых операций на UI.
+        if (BuildConfig.DEBUG) {
+            StrictMode.setThreadPolicy(
+                StrictMode.ThreadPolicy.Builder()
+                    .detectAll()
+                    .permitDiskReads()    // если надо — закомментируй
+                    .permitDiskWrites()   // если надо — закомментируй
+                    .penaltyLog()
+                    .build()
+            )
+        }
         setContentView(R.layout.activity_import)
 
         image = findViewById(R.id.previewImage)
@@ -657,6 +671,11 @@ class ImportActivity : AppCompatActivity() {
                     applyAdjustments()
                     tvStatus.text = "Предпросмотр готов. Можно запускать конвейер."
                     Log.i(TAG, "preview.built w=${bmp.width} h=${bmp.height}")
+                    // Жёсткий фолбэк: если триггеры не стартовали S7 за 2 секунды — делаем попытку сами.
+                    activityScope.launch {
+                        delay(2000)
+                        autoStartIndexingIfReady("preview.fallback.2s")
+                    }
                     autoStartIndexingIfReady("preview.ready")
                 }
             } catch (t: Throwable) {

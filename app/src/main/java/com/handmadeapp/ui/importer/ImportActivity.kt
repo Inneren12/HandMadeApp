@@ -29,6 +29,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.VisibleForTesting
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.exifinterface.media.ExifInterface
@@ -65,7 +66,6 @@ import com.appforcross.editor.palette.S7Spread2OptIo
 import com.appforcross.editor.palette.S7Spread2OptResult
 import com.appforcross.editor.palette.S7Spread2OptSpec
 import com.appforcross.editor.palette.S7SpreadViolation
-import com.handmadeapp.analysis.Stage3Analyze
 import com.handmadeapp.color.ColorMgmt
 import com.handmadeapp.preset.Stage4Runner
 import com.handmadeapp.prescale.PreScaleRunner
@@ -106,12 +106,15 @@ import kotlin.time.Duration.Companion.milliseconds
 import android.os.Handler
 import android.os.Looper
 import com.handmadeapp.runtime.S7Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import com.handmadeapp.watchdog.MainThreadWatchdog
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
  * Реализовано без зависимостей на Activity Result API (для совместимости) — используем onActivityResult.
  */
 class ImportActivity : AppCompatActivity() {
+
+    private val viewModel: ImportViewModel by viewModels()
 
     private lateinit var image: ImageView
     private lateinit var pickBtn: Button
@@ -167,11 +170,8 @@ class ImportActivity : AppCompatActivity() {
     private var currentUri: Uri? = null
     private var lastSampling: S7SamplingResult? = null
     private var lastInit: S7InitResult? = null
-    private var lastPaletteColors: List<S7InitColor>? = null
     private var lastGreedy: S7GreedyResult? = null
     private var overlayImageSize: Size? = null
-    private var cachedMasks: Masks? = null
-    private var cachedMasksSize: Size? = null
     private var samplingRunning = false
     private var overlayPending = false
     private var initRunning = false
@@ -191,15 +191,21 @@ class ImportActivity : AppCompatActivity() {
     private var spreadAffected: FloatArray? = null
     private var kneedleRunning = false
     private var lastKneedle: S7KneedleResult? = null
-    private var indexPreviewBitmap: Bitmap? = null
+    private var boundIndexPreview: Bitmap? = null
     private var indexRunning = false
     private var lastIndexResult: S7IndexResult? = null
-    private var indexCostHeatmapBitmap: Bitmap? = null
-    private var lastPreScale: PreScaleRunner.Output? = null
     private var suppressIndexGridToggle = false
     private var suppressIndexCostToggle = false
     private var suppressFlagToggle = false
     private val mainWatchdog = MainThreadWatchdog()
+
+    private val paletteColorsOrNull: List<S7InitColor>?
+        get() = viewModel.uiState.value.paletteColors.takeIf { it.isNotEmpty() }
+
+    private val currentPreScale: PreScaleRunner.Output?
+        get() = viewModel.uiState.value.preScale
+
+    private var lastViewModelState = ImportViewModel.UiState()
 
     private enum class OverlayMode { NONE, SAMPLING, RESIDUAL, SPREAD, INDEX }
 
@@ -299,7 +305,7 @@ class ImportActivity : AppCompatActivity() {
         cbPalette.setOnCheckedChangeListener { _, isChecked ->
             if (suppressPaletteToggle) return@setOnCheckedChangeListener
             if (!FeatureFlags.S7_INIT) return@setOnCheckedChangeListener
-            paletteStrip.isVisible = isChecked && lastPaletteColors != null
+            paletteStrip.isVisible = isChecked && paletteColorsOrNull != null
         }
 
         cbSpreadBeforeAfter.setOnCheckedChangeListener { _, isChecked ->
@@ -393,8 +399,121 @@ class ImportActivity : AppCompatActivity() {
             handleIndexOverlayToggle()
         }
 
+        observeViewModel()
         updateIndexUiState()
         scheduleWarmupIfNeeded()
+    }
+
+    private fun observeViewModel() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.uiState.collectLatest { state ->
+                    val previous = lastViewModelState
+                    if (state !== previous) {
+                        onViewModelStateChanged(previous, state)
+                        lastViewModelState = state
+                    }
+                }
+            }
+        }
+    }
+
+    private fun onViewModelStateChanged(
+        previous: ImportViewModel.UiState,
+        current: ImportViewModel.UiState
+    ) {
+        if (previous.isIndexRunning != current.isIndexRunning) {
+            indexRunning = current.isIndexRunning
+        }
+
+        when {
+            current.indexResult != null && current.indexResult !== previous.indexResult -> {
+                handleIndexSuccess(current)
+            }
+            current.indexError != null && current.indexError != previous.indexError -> {
+                handleIndexError(current.indexError)
+            }
+            current.indexResult == null && previous.indexResult != null && current.previewBitmap == null -> {
+                if (boundIndexPreview != null) {
+                    boundIndexPreview = null
+                }
+            }
+        }
+    }
+
+    private fun handleIndexSuccess(state: ImportViewModel.UiState) {
+        val result = state.indexResult ?: return
+        indexRunning = false
+        setProgressVisible(false, "s7.index.done")
+        lastIndexResult = result
+        val previousPreview = boundIndexPreview
+        val nextPreview = state.previewBitmap
+        boundIndexPreview = nextPreview
+        if (nextPreview != null) {
+            image.colorFilter = null
+            image.setImageBitmap(nextPreview)
+        }
+        if (previousPreview != null && previousPreview !== nextPreview && !previousPreview.isRecycled) {
+            previousPreview.recycle()
+        }
+        val costBitmap = state.costHeatmap
+        suppressIndexGridToggle = true
+        cbIndexGrid.isChecked = true
+        suppressIndexGridToggle = false
+        suppressIndexCostToggle = true
+        cbIndexCost.isChecked = false
+        suppressIndexCostToggle = false
+        cbIndexGrid.isVisible = true
+        cbIndexGrid.isEnabled = true
+        cbIndexCost.isVisible = true
+        cbIndexCost.isEnabled = costBitmap != null
+        suppressSamplingToggle = true
+        cbSampling.isChecked = false
+        suppressSamplingToggle = false
+        suppressResidualToggle = true
+        cbShowResidual.isChecked = false
+        suppressResidualToggle = false
+        suppressSpreadToggle = true
+        cbSpreadBeforeAfter.isChecked = false
+        suppressSpreadToggle = false
+        cbSpreadBeforeAfter.isEnabled = false
+        overlayMode = OverlayMode.INDEX
+        updateIndexOverlay(applyNewData = true)
+        val stats = result.stats
+        val status = buildString {
+            append("S7.6: index=")
+            append(result.indexBpp)
+            append("-bit, K*=")
+            append(result.kStar)
+            append(", meanCost=")
+            append(String.format(Locale.US, "%.4f", stats.meanCost))
+            append(", foreignZoneHits=")
+            append(stats.foreignZoneHits)
+            append(", EBsum=")
+            append(String.format(Locale.US, "%.3f", stats.edgeBreakPenaltySum))
+            append(", t_ms={prep=")
+            append(stats.prepareMs)
+            append(", assign=")
+            append(stats.assignMs)
+            append(", dither=")
+            append(stats.ditherMs)
+            append(", total=")
+            append(stats.totalMs)
+            append("}")
+            append(", gates=")
+            append(result.gateConfig.summary())
+        }
+        tvStatus.text = status
+        updateIndexUiState()
+    }
+
+    private fun handleIndexError(message: String?) {
+        indexRunning = false
+        setProgressVisible(false, "s7.index.fail")
+        val errorMessage = message ?: "ошибка"
+        tvStatus.text = "S7.6 ошибка: $errorMessage"
+        Toast.makeText(this, "S7.6 ошибка: $errorMessage", Toast.LENGTH_LONG).show()
+        updateIndexUiState()
     }
 
     override fun onResume() {
@@ -698,14 +817,14 @@ class ImportActivity : AppCompatActivity() {
             Toast.makeText(this, "Сначала выполните S7.5", Toast.LENGTH_SHORT).show()
             return
         }
-        val palette = lastPaletteColors
+        val palette = paletteColorsOrNull
         if (palette == null || palette.isEmpty()) {
             Logger.w("PALETTE", "index.fail", mapOf("stage" to "precheck", "reason" to "missing_palette"))
             tvStatus.text = "S7.6: нет палитры K*"
             Toast.makeText(this, "Палитра отсутствует", Toast.LENGTH_SHORT).show()
             return
         }
-        val preScale = lastPreScale
+        val preScale = currentPreScale
         if (preScale == null) {
             Logger.w("PALETTE", "index.fail", mapOf("stage" to "precheck", "reason" to "missing_prescale"))
             tvStatus.text = "S7.6: нет изображения Wst"
@@ -740,118 +859,7 @@ class ImportActivity : AppCompatActivity() {
         setProgressVisible(true, "s7.index.start")
         tvStatus.text = "S7.6: индексируем…"
         updateIndexUiState()
-
-        launchS7Job("s7.index") {
-            var preBitmap: Bitmap? = null
-            var previewBitmap: Bitmap? = null
-            var costBitmap: Bitmap? = null
-            val result: S7IndexResult
-            try {
-                result = run {
-                    preBitmap = BitmapFactory.decodeFile(preScale.pngPath)
-                    if (preBitmap == null) {
-                        throw IllegalStateException("Не удалось открыть preScaled PNG")
-                    }
-                    val scaledMasks = ensureMasksFor(preBitmap!!, uri)
-                    val indexResult = S7Indexer.run(this@ImportActivity, preBitmap!!, scaledMasks, finalPalette, seed, tier)
-                    previewBitmap = BitmapFactory.decodeFile(indexResult.previewPath)
-                        ?: throw IllegalStateException("Не удалось открыть индекс-превью")
-                    val costPath = indexResult.costHeatmapPath
-                    if (costPath != null) {
-                        costBitmap = BitmapFactory.decodeFile(costPath)
-                    }
-                    indexResult
-                }
-                withContext(Dispatchers.Main) {
-                    indexRunning = false
-                    setProgressVisible(false, "s7.index.done")
-                    lastIndexResult = result
-                    updateIndexUiState()
-                    val previousPreview = indexPreviewBitmap
-                    val nextPreview = previewBitmap
-                    indexPreviewBitmap = nextPreview
-                    image.colorFilter = null
-                    image.setImageBitmap(nextPreview)
-                    if (previousPreview != null && previousPreview !== nextPreview) {
-                        previousPreview.recycle()
-                    }
-                    indexCostHeatmapBitmap?.let { old ->
-                        if (old !== costBitmap && !old.isRecycled) {
-                            old.recycle()
-                        }
-                    }
-                    indexCostHeatmapBitmap = costBitmap
-                    suppressIndexGridToggle = true
-                    cbIndexGrid.isChecked = true
-                    suppressIndexGridToggle = false
-                    suppressIndexCostToggle = true
-                    cbIndexCost.isChecked = false
-                    suppressIndexCostToggle = false
-                    cbIndexGrid.isVisible = true
-                    cbIndexGrid.isEnabled = true
-                    cbIndexCost.isVisible = true
-                    cbIndexCost.isEnabled = costBitmap != null
-                    suppressSamplingToggle = true
-                    cbSampling.isChecked = false
-                    suppressSamplingToggle = false
-                    suppressResidualToggle = true
-                    cbShowResidual.isChecked = false
-                    suppressResidualToggle = false
-                    suppressSpreadToggle = true
-                    cbSpreadBeforeAfter.isChecked = false
-                    suppressSpreadToggle = false
-                    cbSpreadBeforeAfter.isEnabled = false
-                    overlayMode = OverlayMode.INDEX
-                    updateIndexOverlay(applyNewData = true)
-                    val stats = result.stats
-                    val status = buildString {
-                        append("S7.6: index=")
-                        append(result.indexBpp)
-                        append("-bit, K*=")
-                        append(result.kStar)
-                        append(", meanCost=")
-                        append(String.format(Locale.US, "%.4f", stats.meanCost))
-                        append(", foreignZoneHits=")
-                        append(stats.foreignZoneHits)
-                        append(", EBsum=")
-                        append(String.format(Locale.US, "%.3f", stats.edgeBreakPenaltySum))
-                        append(", t_ms={prep=")
-                        append(stats.prepareMs)
-                        append(", assign=")
-                        append(stats.assignMs)
-                        append(", dither=")
-                        append(stats.ditherMs)
-                        append(", total=")
-                        append(stats.totalMs)
-                        append("}")
-                        append(", gates=")
-                        append(result.gateConfig.summary())
-                    }
-                    tvStatus.text = status
-                }
-                previewBitmap = null
-                costBitmap = null
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (t: Throwable) {
-                Logger.e("PALETTE", "index.fail", mapOf("stage" to "ui", "error" to (t.message ?: t.toString())), err = t)
-                withContext(Dispatchers.Main) {
-                    indexRunning = false
-                    setProgressVisible(false, "s7.index.fail")
-                    tvStatus.text = "S7.6 ошибка: ${t.message}"
-                    Toast.makeText(this@ImportActivity, "S7.6 ошибка: ${t.message}", Toast.LENGTH_LONG).show()
-                    updateIndexUiState()
-                }
-            } finally {
-                preBitmap?.recycle()
-                if (previewBitmap != null && previewBitmap !== indexPreviewBitmap) {
-                    previewBitmap?.recycle()
-                }
-                if (costBitmap != null && costBitmap !== indexCostHeatmapBitmap) {
-                    costBitmap?.recycle()
-                }
-            }
-        }
+        viewModel.submitIndex(uri, preScale, finalPalette, finalPalette.size, seed, tier)
     }
 
     /** Запуск основного конвейера: Stage3 → Stage4 → PreScale. Результат показываем в превью. */
@@ -877,7 +885,7 @@ class ImportActivity : AppCompatActivity() {
                     gate = stage4.gate,
                     targetWst = targetWst
                 )
-                lastPreScale = pre
+                viewModel.updatePreScale(pre)
 
                 val png = File(pre.pngPath)
                 val outBmp = BitmapFactory.decodeFile(png.absolutePath)
@@ -899,7 +907,7 @@ class ImportActivity : AppCompatActivity() {
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "pipeline.fail: ${t.message}", t)
-                lastPreScale = null
+                viewModel.updatePreScale(null)
                 withContext(Dispatchers.Main) {
                     setProgressVisible(false, "pipeline.fail")
                     btnProcess.isEnabled = true
@@ -914,7 +922,7 @@ class ImportActivity : AppCompatActivity() {
 
     /** Реал-тайм предпросмотр с ColorMatrix (без пересборки битмапа). */
     private fun applyAdjustments() {
-        if (indexPreviewBitmap != null) return
+        if (viewModel.uiState.value.previewBitmap != null) return
         val bmp = baseBitmap ?: return
         val b = (sbBrightness.progress - 100) / 100f   // [-1..+1]
         val c = (sbContrast.progress) / 100f           // [0..2], 1 — без изм.
@@ -1009,7 +1017,6 @@ class ImportActivity : AppCompatActivity() {
     private fun resetSamplingState() {
         lastSampling = null
         lastInit = null
-        lastPaletteColors = null
         lastGreedy = null
         lastSpread = null
         paletteBeforeSpread = null
@@ -1024,17 +1031,17 @@ class ImportActivity : AppCompatActivity() {
         greedyRunning = false
         kneedleRunning = false
         lastKneedle = null
-        indexPreviewBitmap?.recycle()
-        indexPreviewBitmap = null
+        viewModel.updatePaletteColors(emptyList())
+        viewModel.updateKstarReady(false)
         lastIndexResult = null
-        lastPreScale = null
+        viewModel.clearIndexResult()
+        viewModel.updatePreScale(null)
+        viewModel.clearMasks()
         suppressSpreadToggle = true
         cbSpreadBeforeAfter.isChecked = false
         suppressSpreadToggle = false
         cbSpreadBeforeAfter.isVisible = false
         cbSpreadBeforeAfter.isEnabled = false
-        cachedMasks = null
-        cachedMasksSize = null
         overlayImageSize = null
         suppressSamplingToggle = true
         cbSampling.isChecked = false
@@ -1079,7 +1086,7 @@ class ImportActivity : AppCompatActivity() {
             try {
                 val sampling = S7Sampler.run(
                     bmp,
-                    ensureMasksFor(bmp, uri),
+                    viewModel.ensureScaledMasks(bmp, uri),
                     S7SamplingSpec.detectDeviceTier(this@ImportActivity).key,
                     S7SamplingSpec.DEFAULT_SEED
                 )
@@ -1134,33 +1141,6 @@ class ImportActivity : AppCompatActivity() {
                 }
             }
         }
-    }
-
-    private fun ensureMasksFor(bmp: Bitmap, uri: Uri): Masks {
-        val cached = cachedMasks
-        val size = cachedMasksSize
-        if (cached != null && size != null && size.width == bmp.width && size.height == bmp.height) {
-            return cached
-        }
-        Logger.i("PALETTE", "sampling.masks.build", mapOf("w" to bmp.width, "h" to bmp.height))
-        val analyze = Stage3Analyze.run(this, uri)
-        val scaled = scaleMasks(analyze.masks, bmp.width, bmp.height)
-        cachedMasks = scaled
-        cachedMasksSize = Size(bmp.width, bmp.height)
-        return scaled
-    }
-
-    private fun scaleMasks(masks: Masks, targetW: Int, targetH: Int): Masks {
-        if (masks.edge.width == targetW && masks.edge.height == targetH) return masks
-        val filter = true
-        return Masks(
-            edge = Bitmap.createScaledBitmap(masks.edge, targetW, targetH, filter),
-            flat = Bitmap.createScaledBitmap(masks.flat, targetW, targetH, filter),
-            hiTexFine = Bitmap.createScaledBitmap(masks.hiTexFine, targetW, targetH, filter),
-            hiTexCoarse = Bitmap.createScaledBitmap(masks.hiTexCoarse, targetW, targetH, filter),
-            skin = Bitmap.createScaledBitmap(masks.skin, targetW, targetH, filter),
-            sky = Bitmap.createScaledBitmap(masks.sky, targetW, targetH, filter)
-        )
     }
 
     private fun ensureOverlaySize(): Size? {
@@ -1340,7 +1320,7 @@ class ImportActivity : AppCompatActivity() {
                     lastInit = result
                     lastGreedy = null
                     residualErrors = null
-                    lastPaletteColors = result.colors
+                    viewModel.updatePaletteColors(result.colors)
                     btnInitK0.isEnabled = FeatureFlags.S7_INIT
                     btnGrowK.isEnabled = FeatureFlags.S7_GREEDY
                     setProgressVisible(false, "s7.init.done")
@@ -1443,7 +1423,7 @@ class ImportActivity : AppCompatActivity() {
                     btnSpread2Opt.isEnabled = FeatureFlags.S7_SPREAD2OPT
                     setProgressVisible(false, "s7.greedy.done")
                     lastGreedy = result
-                    lastPaletteColors = result.colors
+                    viewModel.updatePaletteColors(result.colors)
                     if (errorsForUi != null) {
                         residualErrors = errorsForUi
                         residualDeMed = result.residual.deMed
@@ -1567,7 +1547,7 @@ class ImportActivity : AppCompatActivity() {
                     paletteBeforeSpread = colorsBefore
                     spreadAmbiguity = ambiguity
                     spreadAffected = affected
-                    lastPaletteColors = result.colors
+                    viewModel.updatePaletteColors(result.colors)
                     val violationsAfterSet = violationIndices(result.violationsAfter)
                     suppressSpreadToggle = true
                     cbSpreadBeforeAfter.isChecked = false
@@ -1698,9 +1678,10 @@ class ImportActivity : AppCompatActivity() {
                     btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
                     setProgressVisible(false, "s7.kneedle.done")
                     lastKneedle = result
-                    val previousPreview = indexPreviewBitmap
+                    viewModel.updateKstarReady(true)
+                    val previousPreview = boundIndexPreview
                     val previewForUi = indexPreview
-                    indexPreviewBitmap = previewForUi
+                    boundIndexPreview = previewForUi
                     autoStartIndexingIfReady("kneedle.done")
                     updatePalettePreview(finalPalette)
                     if (errorsForUi != null) {
@@ -1736,7 +1717,7 @@ class ImportActivity : AppCompatActivity() {
                         image.colorFilter = null
                         image.setImageBitmap(it)
                     }
-                    if (previousPreview != null && previousPreview !== previewForUi) {
+                    if (previousPreview != null && previousPreview !== previewForUi && !previousPreview.isRecycled) {
                         previousPreview.recycle()
                     }
                     val dMax = (result.params["Dmax"] as? Number)?.toFloat() ?: 0f
@@ -1792,7 +1773,7 @@ class ImportActivity : AppCompatActivity() {
                 }
             } finally {
                 residualBitmap?.recycle()
-                if (indexPreview != null && indexPreview !== indexPreviewBitmap) {
+                if (indexPreview != null && indexPreview !== boundIndexPreview) {
                     indexPreview?.recycle()
                 }
             }
@@ -1800,7 +1781,7 @@ class ImportActivity : AppCompatActivity() {
     }
 
     private fun updatePalettePreview(colors: List<S7InitColor>) {
-        lastPaletteColors = colors
+        viewModel.updatePaletteColors(colors)
         pendingPaletteColors = colors
         palettePreviewThrottler.submit {
             val palette = pendingPaletteColors
@@ -1825,12 +1806,8 @@ class ImportActivity : AppCompatActivity() {
     private fun resetIndexState() {
         indexRunning = false
         lastIndexResult = null
-        indexCostHeatmapBitmap?.let { bitmap ->
-            if (!bitmap.isRecycled) {
-                bitmap.recycle()
-            }
-        }
-        indexCostHeatmapBitmap = null
+        viewModel.clearIndexResult()
+        boundIndexPreview = null
         suppressIndexGridToggle = true
         cbIndexGrid.isChecked = false
         suppressIndexGridToggle = false
@@ -1943,11 +1920,12 @@ class ImportActivity : AppCompatActivity() {
     }
 
     private fun updateIndexUiState() {
-        val canRun = FeatureFlags.S7_INDEX && lastKneedle != null && lastPreScale != null && !indexRunning
+        val state = viewModel.uiState.value
+        val canRun = FeatureFlags.S7_INDEX && state.isKstarReady && state.preScale != null && !indexRunning
         btnIndexK.isVisible = FeatureFlags.S7_INDEX
         setS7TriggerEnabled(btnIndexK, canRun)
         val hasResult = lastIndexResult != null
-        val costAvailable = indexCostHeatmapBitmap != null
+        val costAvailable = state.costHeatmap != null
         cbIndexGrid.isVisible = FeatureFlags.S7_INDEX && hasResult
         cbIndexGrid.isEnabled = hasResult && !indexRunning
         cbIndexCost.isVisible = FeatureFlags.S7_INDEX && hasResult
@@ -1956,12 +1934,13 @@ class ImportActivity : AppCompatActivity() {
 
     private fun updateIndexOverlay(applyNewData: Boolean) {
         val result = lastIndexResult ?: return
+        val costBitmap = viewModel.uiState.value.costHeatmap
         val size = Size(result.width, result.height)
         val grid = cbIndexGrid.isChecked
-        val costChecked = cbIndexCost.isChecked && indexCostHeatmapBitmap != null
+        val costChecked = cbIndexCost.isChecked && costBitmap != null
         if (grid || costChecked) {
             if (applyNewData || overlayMode != OverlayMode.INDEX) {
-                overlay.setIndexOverlay(size, result.indexBpp, grid, indexCostHeatmapBitmap, costChecked)
+                overlay.setIndexOverlay(size, result.indexBpp, grid, costBitmap, costChecked)
             } else {
                 overlay.updateIndexOverlay(grid, costChecked)
             }
@@ -1994,7 +1973,7 @@ class ImportActivity : AppCompatActivity() {
 
     private fun resetPaletteState() {
         lastInit = null
-        lastPaletteColors = null
+        viewModel.updatePaletteColors(emptyList())
         lastGreedy = null
         residualErrors = null
         residualDeMed = 0f
@@ -2002,6 +1981,7 @@ class ImportActivity : AppCompatActivity() {
         greedyRunning = false
         paletteStrip.setPalette(null)
         paletteStrip.isVisible = false
+        pendingPaletteColors = null
         suppressPaletteToggle = true
         cbPalette.isChecked = false
         suppressPaletteToggle = false
@@ -2028,6 +2008,7 @@ class ImportActivity : AppCompatActivity() {
         cbShowResidual.isEnabled = false
         cbShowResidual.isVisible = false
         lastKneedle = null
+        viewModel.updateKstarReady(false)
         resetIndexState()
     }
 
@@ -2409,9 +2390,10 @@ class ImportActivity : AppCompatActivity() {
      * Пишет подробный лог, почему пропустили запуск.
      */
     private fun autoStartIndexingIfReady(trigger: String) {
-        val kReady = lastKneedle != null
-        val palReady = !lastPaletteColors.isNullOrEmpty()
-        val preReady = lastPreScale != null
+        val state = viewModel.uiState.value
+        val kReady = state.isKstarReady
+        val palReady = paletteColorsOrNull != null
+        val preReady = state.preScale != null
         val flagOn = FeatureFlags.S7_INDEX
         val canRun = flagOn && !indexRunning && kReady && palReady && preReady
         val reason = when {

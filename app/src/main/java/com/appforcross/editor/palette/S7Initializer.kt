@@ -36,6 +36,7 @@ data class S7InitResult(
 object S7Initializer {
 
     fun run(sampling: S7SamplingResult, seed: Long): S7InitResult {
+        S7ThreadGuard.assertBackground("s7.initializer.run")
         require(sampling.samples.isNotEmpty()) { "Sampling is empty" }
         val notes = ArrayList<String>()
         val params = LinkedHashMap<String, Any?>()

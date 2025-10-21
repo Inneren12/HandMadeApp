@@ -65,6 +65,7 @@ object S7Indexer {
         seed: Long,
         deviceTier: String
     ): S7IndexResult {
+        S7ThreadGuard.assertBackground("s7.index.run")
         FeatureFlags.logIndexFlag()
         val totalStart = SystemClock.elapsedRealtime()
         val width = preScaledImage.width
@@ -89,6 +90,7 @@ object S7Indexer {
         )
 
         return S7WorkspacePool.acquire(total, k, bytesPerPixel).use { workspace ->
+            S7ThreadGuard.assertBackground("s7.index.prepare")
             val indexBuffer = workspace.indexBuffer
             val indexData = workspace.indexBytes
             val previewPixels = IntArray(total)
@@ -340,6 +342,7 @@ object S7Indexer {
                 )
             )
 
+            S7ThreadGuard.assertBackground("s7.index.dither")
             val ditherStart = SystemClock.elapsedRealtime()
             val gcBeforeDither = captureGc()
             val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -548,6 +551,7 @@ object S7Indexer {
         indexData: ByteArray,
         indexBpp: Int
     ): AssignmentMetrics {
+        S7ThreadGuard.assertBackground("s7.index.assign.tiles")
         var sumCost = 0.0
         var sumEb = 0.0
         var sumCoh = 0.0
@@ -713,6 +717,7 @@ object S7Indexer {
         indexData: ByteArray,
         indexBpp: Int
     ): AssignmentMetrics {
+        S7ThreadGuard.assertBackground("s7.index.assign.seq")
         var sumCost = 0.0
         var sumEb = 0.0
         var sumCoh = 0.0

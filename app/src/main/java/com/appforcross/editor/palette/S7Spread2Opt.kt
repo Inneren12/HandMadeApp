@@ -9,6 +9,7 @@ import com.handmadeapp.color.ColorMgmt
 import com.handmadeapp.logging.Logger
 import java.util.ArrayList
 import java.util.LinkedHashMap
+import kotlin.io.use
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
@@ -156,7 +157,9 @@ object S7Spread2Opt {
             tileHeight = tileSpec.height,
             threshold = TILE_ERROR_THRESHOLD
         )
-        val initialAssignments = initialCache.buildSummary().toAssignmentSummary()
+        var assignCacheRef: S7AssignCache = initialCache
+        try {
+            val initialAssignments = initialCache.buildSummary().toAssignmentSummary()
         val violations = findViolations(initialPalette)
         val deMinBefore = violations.firstOrNull()?.de ?: computeMinDistance(initialPalette)
         Logger.i(
@@ -333,6 +336,7 @@ object S7Spread2Opt {
             tileErrorMap?.let { put("tile_error_map", it.toDiagnostics()) }
         }
 
+        assignCacheRef = currentState.assignCache
         return S7Spread2OptResult(
             colors = finalPalette,
             violationsBefore = initialState.violations,
@@ -347,6 +351,9 @@ object S7Spread2Opt {
             tileErrors = tileErrorMap,
             params = params
         )
+        } finally {
+            assignCacheRef.close()
+        }
     }
 
     private fun S7AssignCache.updateColorWithFallback(colorIdx: Int, lab: FloatArray, threshold: Float) {
@@ -579,33 +586,34 @@ object S7Spread2Opt {
                 else -> color
             }
         }
-        val candidateCache = state.assignCache.copy()
-        candidateCache.updateColorWithFallback(i, projectedI.lab, TILE_ERROR_THRESHOLD)
-        candidateCache.updateColorWithFallback(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
-        val assignmentsSnapshot = candidateCache.buildSummary()
-        val assignments = assignmentsSnapshot.toAssignmentSummary()
-        val de95 = assignments.de95
-        val gbi = assignments.gbi
-        val shiftI = distance(state.colors[i].okLab, projectedI.lab)
-        val shiftJ = distance(state.colors[j].okLab, projectedJ.lab)
-        val gain = S7Spread2OptSpec.ALPHA * (currentDe95 - de95) +
-            S7Spread2OptSpec.BETA * (currentGbi - gbi) -
-            S7Spread2OptSpec.MU * (shiftI + shiftJ)
-        val moves = listOf(
-            S7Move(i, state.colors[i].okLab.copyOf(), projectedI.lab.copyOf(), shiftI, projectedI.clipped),
-            S7Move(j, state.colors[j].okLab.copyOf(), projectedJ.lab.copyOf(), shiftJ, projectedJ.clipped)
-        )
-        val dePair = distance(projectedI.lab, projectedJ.lab)
-        return CandidateEvaluation(
-            variant = variant,
-            moves = moves,
-            gain = gain,
-            de95 = de95,
-            gbi = gbi,
-            dePair = dePair,
-            clippedMoves = moves.count { it.clipped },
-            reason = null
-        )
+        return state.assignCache.copy().use { candidateCache ->
+            candidateCache.updateColorWithFallback(i, projectedI.lab, TILE_ERROR_THRESHOLD)
+            candidateCache.updateColorWithFallback(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
+            val assignmentsSnapshot = candidateCache.buildSummary()
+            val assignments = assignmentsSnapshot.toAssignmentSummary()
+            val de95 = assignments.de95
+            val gbi = assignments.gbi
+            val shiftI = distance(state.colors[i].okLab, projectedI.lab)
+            val shiftJ = distance(state.colors[j].okLab, projectedJ.lab)
+            val gain = S7Spread2OptSpec.ALPHA * (currentDe95 - de95) +
+                S7Spread2OptSpec.BETA * (currentGbi - gbi) -
+                S7Spread2OptSpec.MU * (shiftI + shiftJ)
+            val moves = listOf(
+                S7Move(i, state.colors[i].okLab.copyOf(), projectedI.lab.copyOf(), shiftI, projectedI.clipped),
+                S7Move(j, state.colors[j].okLab.copyOf(), projectedJ.lab.copyOf(), shiftJ, projectedJ.clipped)
+            )
+            val dePair = distance(projectedI.lab, projectedJ.lab)
+            CandidateEvaluation(
+                variant = variant,
+                moves = moves,
+                gain = gain,
+                de95 = de95,
+                gbi = gbi,
+                dePair = dePair,
+                clippedMoves = moves.count { it.clipped },
+                reason = null
+            )
+        }
     }
 
     private fun evaluateMedoidCandidate(
@@ -660,33 +668,34 @@ object S7Spread2Opt {
                 else -> color
             }
         }
-        val candidateCache = state.assignCache.copy()
-        candidateCache.updateColorWithFallback(i, projectedI.lab, TILE_ERROR_THRESHOLD)
-        candidateCache.updateColorWithFallback(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
-        val assignmentsSnapshot = candidateCache.buildSummary()
-        val assignments = assignmentsSnapshot.toAssignmentSummary()
-        val de95 = assignments.de95
-        val gbi = assignments.gbi
-        val shiftI = distance(state.colors[i].okLab, projectedI.lab)
-        val shiftJ = distance(state.colors[j].okLab, projectedJ.lab)
-        val gain = S7Spread2OptSpec.ALPHA * (currentDe95 - de95) +
-            S7Spread2OptSpec.BETA * (currentGbi - gbi) -
-            S7Spread2OptSpec.MU * (shiftI + shiftJ)
-        val moves = listOf(
-            S7Move(i, state.colors[i].okLab.copyOf(), projectedI.lab.copyOf(), shiftI, projectedI.clipped),
-            S7Move(j, state.colors[j].okLab.copyOf(), projectedJ.lab.copyOf(), shiftJ, projectedJ.clipped)
-        )
-        val dePair = distance(projectedI.lab, projectedJ.lab)
-        return CandidateEvaluation(
-            variant = "medoid",
-            moves = moves,
-            gain = gain,
-            de95 = de95,
-            gbi = gbi,
-            dePair = dePair,
-            clippedMoves = moves.count { it.clipped },
-            reason = null
-        )
+        return state.assignCache.copy().use { candidateCache ->
+            candidateCache.updateColorWithFallback(i, projectedI.lab, TILE_ERROR_THRESHOLD)
+            candidateCache.updateColorWithFallback(j, projectedJ.lab, TILE_ERROR_THRESHOLD)
+            val assignmentsSnapshot = candidateCache.buildSummary()
+            val assignments = assignmentsSnapshot.toAssignmentSummary()
+            val de95 = assignments.de95
+            val gbi = assignments.gbi
+            val shiftI = distance(state.colors[i].okLab, projectedI.lab)
+            val shiftJ = distance(state.colors[j].okLab, projectedJ.lab)
+            val gain = S7Spread2OptSpec.ALPHA * (currentDe95 - de95) +
+                S7Spread2OptSpec.BETA * (currentGbi - gbi) -
+                S7Spread2OptSpec.MU * (shiftI + shiftJ)
+            val moves = listOf(
+                S7Move(i, state.colors[i].okLab.copyOf(), projectedI.lab.copyOf(), shiftI, projectedI.clipped),
+                S7Move(j, state.colors[j].okLab.copyOf(), projectedJ.lab.copyOf(), shiftJ, projectedJ.clipped)
+            )
+            val dePair = distance(projectedI.lab, projectedJ.lab)
+            CandidateEvaluation(
+                variant = "medoid",
+                moves = moves,
+                gain = gain,
+                de95 = de95,
+                gbi = gbi,
+                dePair = dePair,
+                clippedMoves = moves.count { it.clipped },
+                reason = null
+            )
+        }
     }
 
     private fun findWeightedMedoid(samples: List<S7Sample>, indices: List<Int>): FloatArray? {

@@ -119,6 +119,7 @@ object S7Spread2Opt {
         seed: Long,
         deviceTier: String
     ): S7Spread2OptResult {
+        S7ThreadGuard.assertBackground("s7.spread2opt.run")
         FeatureFlags.logSpread2OptFlag()
         require(passes >= 1) { "passes must be >=1" }
         val effectivePasses = passes.coerceIn(1, S7Spread2OptSpec.P_PASSES_MAX)

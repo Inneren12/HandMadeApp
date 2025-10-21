@@ -13,6 +13,7 @@ import java.util.Locale
 
 object S7IndexIo {
     fun writeIndexBin(file: File, width: Int, height: Int, K: Int, bpp: Int, data: ByteArray) {
+        S7ThreadGuard.assertBackground("s7.index.export.bin")
         val headerSize = 4 + 2 + 1 + 1 + 4 + 4 + 2 + 2
         val buffer = ByteBuffer.allocate(headerSize).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(byteArrayOf('I'.code.toByte(), 'D'.code.toByte(), 'X'.code.toByte(), '1'.code.toByte()))
@@ -31,6 +32,7 @@ object S7IndexIo {
     }
 
     fun writeIndexPreviewPng(file: File, bitmap: Bitmap) {
+        S7ThreadGuard.assertBackground("s7.index.export.preview")
         file.parentFile?.mkdirs()
         FileOutputStream(file).use { fos ->
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
@@ -38,6 +40,7 @@ object S7IndexIo {
     }
 
     fun writeLegendCsv(file: File, colors: List<S7InitColor>) {
+        S7ThreadGuard.assertBackground("s7.index.export.legend")
         file.parentFile?.mkdirs()
         FileWriter(file, false).use { writer ->
             writer.appendLine("index,role,L,a,b,R,G,B,hex,protected")
@@ -62,6 +65,7 @@ object S7IndexIo {
     }
 
     fun writeIndexMetaJson(file: File, stats: S7IndexStats) {
+        S7ThreadGuard.assertBackground("s7.index.export.meta")
         file.parentFile?.mkdirs()
         val root = JSONObject()
         root.put("Kstar", stats.kStar)
@@ -91,6 +95,7 @@ object S7IndexIo {
     }
 
     fun writeCostHeatmapPng(file: File, bitmap: Bitmap) {
+        S7ThreadGuard.assertBackground("s7.index.export.heatmap")
         file.parentFile?.mkdirs()
         FileOutputStream(file).use { fos ->
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)

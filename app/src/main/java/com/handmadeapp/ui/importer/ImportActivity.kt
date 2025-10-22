@@ -423,16 +423,16 @@ class ImportActivity : AppCompatActivity() {
         previous: ImportViewModel.UiState,
         current: ImportViewModel.UiState
     ) {
-        if (previous.isIndexRunning != current.isIndexRunning) {
-            indexRunning = current.isIndexRunning
+        if (previous.indexRunning != current.indexRunning) {
+            indexRunning = current.indexRunning
         }
 
         when {
             current.indexResult != null && current.indexResult !== previous.indexResult -> {
                 handleIndexSuccess(current)
             }
-            current.indexError != null && current.indexError != previous.indexError -> {
-                handleIndexError(current.indexError)
+            current.errorMessage != null && current.errorMessage != previous.errorMessage -> {
+                handleIndexError(current.errorMessage)
             }
             current.indexResult == null && previous.indexResult != null && current.previewBitmap == null -> {
                 if (boundIndexPreview != null) {
@@ -509,7 +509,6 @@ class ImportActivity : AppCompatActivity() {
     }
 
     private fun handleIndexError(message: String?) {
-        indexRunning = false
         setProgressVisible(false, "s7.index.fail")
         val errorMessage = message ?: "ошибка"
         tvStatus.text = "S7.6 ошибка: $errorMessage"
@@ -772,6 +771,7 @@ class ImportActivity : AppCompatActivity() {
         fileNameView.text = queryDisplayName(uri) ?: "Выбран файл"
         tvStatus.text = "Загружаем превью…"
         currentUri = uri
+        viewModel.updateSourceUri(uri)
         resetSamplingState()
         setS7TriggerEnabled(cbSampling, false)
         activityScope.launch(Dispatchers.Default) {
@@ -787,12 +787,7 @@ class ImportActivity : AppCompatActivity() {
                     applyAdjustments()
                     tvStatus.text = "Предпросмотр готов. Можно запускать конвейер."
                     Log.i(TAG, "preview.built w=${bmp.width} h=${bmp.height}")
-                    // Жёсткий фолбэк: если триггеры не стартовали S7 за 2 секунды — делаем попытку сами.
-                    activityScope.launch {
-                        delay(2000)
-                        autoStartIndexingIfReady("preview.fallback.2s")
-                    }
-                    autoStartIndexingIfReady("preview.ready")
+                    viewModel.autoStartIndexingIfReady("preview.ready")
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "import.decode.fail: ${t.message}", t)
@@ -899,7 +894,7 @@ class ImportActivity : AppCompatActivity() {
                     btnProcess.isEnabled = true
                     setS7TriggerEnabled(btnInitK0, FeatureFlags.S7_INIT && lastSampling != null)
                     updateIndexUiState()
-                    autoStartIndexingIfReady("pipeline.done")
+                    viewModel.autoStartIndexingIfReady("pipeline.done")
                     Toast.makeText(this@ImportActivity, "Конвейер завершён", Toast.LENGTH_SHORT).show()
                 }
             } catch (t: Throwable) {
@@ -1029,7 +1024,7 @@ class ImportActivity : AppCompatActivity() {
         kneedleRunning = false
         lastKneedle = null
         viewModel.updatePaletteColors(emptyList())
-        viewModel.updateKstarReady(false)
+        viewModel.updateKneedleResult(null, null)
         lastIndexResult = null
         viewModel.clearIndexResult()
         viewModel.updatePreScale(null)
@@ -1675,11 +1670,12 @@ class ImportActivity : AppCompatActivity() {
                     btnFinalizeK.isEnabled = FeatureFlags.S7_KNEEDLE
                     setProgressVisible(false, "s7.kneedle.done")
                     lastKneedle = result
-                    viewModel.updateKstarReady(true)
+                    val seed = (result.params["seed"] as? Number)?.toLong() ?: S7SamplingSpec.DEFAULT_SEED
+                    viewModel.updateKneedleResult(result.Kstar, seed)
                     val previousPreview = boundIndexPreview
                     val previewForUi = indexPreview
                     boundIndexPreview = previewForUi
-                    autoStartIndexingIfReady("kneedle.done")
+                    viewModel.autoStartIndexingIfReady("kneedle.done")
                     updatePalettePreview(finalPalette)
                     if (errorsForUi != null) {
                         residualErrors = errorsForUi
@@ -1918,15 +1914,17 @@ class ImportActivity : AppCompatActivity() {
 
     private fun updateIndexUiState() {
         val state = viewModel.uiState.value
-        val canRun = FeatureFlags.S7_INDEX && state.isKstarReady && state.preScale != null && !indexRunning
+        val running = state.indexRunning
+        val kReady = (state.kStar ?: 0) > 0
+        val canRun = FeatureFlags.S7_INDEX && kReady && state.preScale != null && !running
         btnIndexK.isVisible = FeatureFlags.S7_INDEX
         setS7TriggerEnabled(btnIndexK, canRun)
         val hasResult = lastIndexResult != null
         val costAvailable = state.costHeatmap != null
         cbIndexGrid.isVisible = FeatureFlags.S7_INDEX && hasResult
-        cbIndexGrid.isEnabled = hasResult && !indexRunning
+        cbIndexGrid.isEnabled = hasResult && !running
         cbIndexCost.isVisible = FeatureFlags.S7_INDEX && hasResult
-        cbIndexCost.isEnabled = hasResult && costAvailable && !indexRunning
+        cbIndexCost.isEnabled = hasResult && costAvailable && !running
     }
 
     private fun updateIndexOverlay(applyNewData: Boolean) {
@@ -2005,7 +2003,7 @@ class ImportActivity : AppCompatActivity() {
         cbShowResidual.isEnabled = false
         cbShowResidual.isVisible = false
         lastKneedle = null
-        viewModel.updateKstarReady(false)
+        viewModel.updateKneedleResult(null, null)
         resetIndexState()
     }
 
@@ -2411,40 +2409,6 @@ class ImportActivity : AppCompatActivity() {
      * Автозапуск индекса S7, если всё готово.
      * Пишет подробный лог, почему пропустили запуск.
      */
-    private fun autoStartIndexingIfReady(trigger: String) {
-        val state = viewModel.uiState.value
-        val kReady = state.isKstarReady
-        val palReady = paletteColorsOrNull != null
-        val preReady = state.preScale != null
-        val flagOn = FeatureFlags.S7_INDEX
-        val canRun = flagOn && !indexRunning && kReady && palReady && preReady
-        val reason = when {
-            canRun -> "ready"
-            !flagOn -> "flag_off"
-            indexRunning -> "index_running"
-            !kReady -> "missing_kneedle"
-            !palReady -> "missing_palette"
-            !preReady -> "missing_prescale"
-            else -> "unknown"
-        }
-        Logger.i(
-            "PALETTE", "s7.autorun.check",
-            mapOf(
-                "trigger" to trigger,
-                "indexRunning" to indexRunning,
-                "flag" to flagOn,
-                "kReady" to kReady,
-                "palReady" to palReady,
-                "preReady" to preReady,
-                "ready" to canRun,
-                "reason" to reason
-            )
-        )
-        if (canRun) {
-            startIndexingK()
-        }
-    }
-
     companion object {
         private const val TAG = "ImportActivity"
         private const val RC_OPEN_IMAGE = 1001

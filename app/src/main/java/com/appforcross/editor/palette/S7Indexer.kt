@@ -111,7 +111,8 @@ object S7Indexer {
         deviceTier: String,
         mode: Mode = Mode.PREVIEW,
         sourceWidth: Int? = null,
-        sourceHeight: Int? = null
+        sourceHeight: Int? = null,
+        progressListener: ((Int) -> Unit)? = null,
     ): S7IndexResult {
         // Гард: запуск S7 на главном потоке запрещён.
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -137,6 +138,7 @@ object S7Indexer {
             masks.edge.height > 0 -> masks.edge.height
             else -> previewHeight
         }
+        progressListener?.invoke(0)
         Logger.i(
             "PALETTE",
             "s7.start",
@@ -171,6 +173,7 @@ object S7Indexer {
         validateMaskDimensions(masks, width, height)
 
         return S7WorkspacePool.acquire(width, height, k, bytesPerPixel).use { workspace ->
+            var progressNotified = 0
             try {
                 S7ThreadGuard.assertBackground("s7.index.prepare")
                 val indexBuffer = workspace.indexBuffer
@@ -265,6 +268,10 @@ object S7Indexer {
                     overlap = S7IndexSpec.TILE_OVERLAP
                 )
                 val workerCount = computeWorkerCount(scheduler.tileCount)
+                if (progressNotified < 20) {
+                    progressListener?.invoke(20)
+                    progressNotified = 20
+                }
 
                 val workspaceMetrics = linkedMapOf(
                     "width" to width,
@@ -279,254 +286,261 @@ object S7Indexer {
                     "byte_planes" to workspace.bytePlaneCount,
                     "pooling" to workspace.poolingEnabled
                 )
-            val baselineStartNs = System.nanoTime()
-            // Преобразуем значения в Any, чтобы можно было добавлять строковые/long поля
-            val baselineStartLog: MutableMap<String, Any> =
-                workspaceMetrics.mapValues { it.value as Any }.toMutableMap().apply {
-                    put("phase", "start")
-                }
-            Logger.i("PALETTE", "s7.baseline", baselineStartLog)
+                val baselineStartNs = System.nanoTime()
+                val baselineStartLog: MutableMap<String, Any> =
+                    workspaceMetrics.mapValues { it.value as Any }.toMutableMap().apply {
+                        put("phase", "start")
+                    }
+                Logger.i("PALETTE", "s7.baseline", baselineStartLog)
 
-            val startParams = linkedMapOf(
-                "algo" to S7IndexSpec.ALGO_VERSION,
-                "Kstar" to k,
-                "alpha0" to S7IndexSpec.ALPHA0,
-                "beta_fz" to S7IndexSpec.BETA_FZ,
-                "beta_edge" to S7IndexSpec.BETA_EDGE,
-                "beta_skin" to S7IndexSpec.BETA_SKIN,
-                "beta_coh" to S7IndexSpec.BETA_COH,
-                "tau_h_deg" to S7IndexSpec.TAU_H_DEG,
-                "tile_w" to tileSpec.width,
-                "tile_h" to tileSpec.height,
-                "tile_overlap" to S7IndexSpec.TILE_OVERLAP,
-                "tiles" to scheduler.tileCount,
-                "workers" to workerCount,
-                "seed" to seed,
-                "device_tier" to deviceTier,
-                "index_bpp" to indexBpp,
-                "diag_gates" to gateConfig.toParamMap()
-            )
-            Logger.i("PALETTE", "index.start", startParams)
-
-            var sumCost = 0.0
-            var sumEb = 0.0
-            var sumCoh = 0.0
-            var foreignHits = 0
-            var distEvalsTotal = 0L
-            var ownerChanges = 0L
-            var tilesUpdated = 0
-            var prepareMs = 0L
-            var assignMs = 0L
-            var ditherMs = 0L
-
-            val zoneEntries = S7SamplingSpec.Zone.entries.toTypedArray()
-            val tileAggregates = Array(scheduler.tileCount) { TileAggregate() }
-
-            val meanCost = try {
-                val assignStart = SystemClock.elapsedRealtime()
-                prepareMs = assignStart - totalStart
-                val gcBeforeAssign = captureGc()
-                val metrics = if (FeatureFlags.S7_PARALLEL_TILES_ENABLED) {
-                    assignUsingTiles(
-                        scheduler = scheduler,
-                        tileAggregates = tileAggregates,
-                        width = width,
-                        height = height,
-                        total = total,
-                        k = k,
-                        zoneEntries = zoneEntries,
-                        zones = zones,
-                        lPlane = lPlane,
-                        aPlane = aPlane,
-                        bPlane = bPlane,
-                        huePlane = huePlane,
-                        edgeMask = edgeMask,
-                        paletteLab = paletteLab,
-                        paletteHues = paletteHues,
-                        paletteRoles = paletteRoles,
-                        paletteColors = paletteColors,
-                        assigned = assigned,
-                        counts = counts,
-                        costs = costs,
-                        previewPixels = previewPixels,
-                        indexData = indexData,
-                        indexBpp = indexBpp
-                    )
-                } else {
-                    assignSequential(
-                        width = width,
-                        height = height,
-                        total = total,
-                        k = k,
-                        zoneEntries = zoneEntries,
-                        zones = zones,
-                        lPlane = lPlane,
-                        aPlane = aPlane,
-                        bPlane = bPlane,
-                        huePlane = huePlane,
-                        edgeMask = edgeMask,
-                        paletteLab = paletteLab,
-                        paletteHues = paletteHues,
-                        paletteRoles = paletteRoles,
-                        paletteColors = paletteColors,
-                        assigned = assigned,
-                        counts = counts,
-                        costs = costs,
-                        previewPixels = previewPixels,
-                        indexData = indexData,
-                        indexBpp = indexBpp
-                    )
-                }
-                sumCost = metrics.sumCost
-                sumEb = metrics.sumEb
-                sumCoh = metrics.sumCoh
-                foreignHits = metrics.foreignHits
-                distEvalsTotal = metrics.distEvals
-                ownerChanges = metrics.ownerChanges
-                tilesUpdated = metrics.tilesUpdated
-                val assignEnd = SystemClock.elapsedRealtime()
-                assignMs = assignEnd - assignStart
-                val gcAfterAssign = captureGc()
-                logGc("assign", gcBeforeAssign, gcAfterAssign)
-                metrics.meanCost
-            } catch (t: Throwable) {
-                Logger.e(
-                    "PALETTE",
-                    "index.fail",
-                    mapOf("stage" to "assign", "error" to (t.message ?: t.toString())),
-                    err = t
-                )
-                throw t
-            }
-
-            val baselineDurationMs = (System.nanoTime() - baselineStartNs) / 1_000_000
-            val baselineEndLog: MutableMap<String, Any> =
-                workspaceMetrics.mapValues { it.value as Any }.toMutableMap().apply {
-                    put("phase", "end")
-                    put("duration_ms", baselineDurationMs)
-                }
-            Logger.i("PALETTE", "s7.baseline", baselineEndLog)
-
-            val topCounts = counts.withIndex()
-                .sortedByDescending { it.value }
-                .take(S7IndexSpec.COUNTS_TOP_N)
-                .map { mapOf("index" to it.index, "count" to it.value) }
-
-            Logger.i(
-                "PALETTE",
-                "index.assign",
-                linkedMapOf(
-                    "index_bpp" to indexBpp,
-                    "counts_per_color_topN" to topCounts,
-                    "foreign_zone_hits" to foreignHits,
-                    "edge_break_penalty_sum" to sumEb,
-                    "coh_bonus_sum" to sumCoh,
-                    "mean_cost" to meanCost,
-                    "prepare_ms" to prepareMs,
-                    "assign_ms" to assignMs,
-                    "dist_evals_total" to distEvalsTotal,
-                    "owner_changes" to ownerChanges,
-                    "tiles_updated" to tilesUpdated
-                )
-            )
-
-            S7ThreadGuard.assertBackground("s7.index.dither")
-            val ditherStart = SystemClock.elapsedRealtime()
-            val gcBeforeDither = captureGc()
-            val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            previewBitmap.setPixels(previewPixels, 0, width, 0, 0, width, height)
-            val costHeatmapBitmap = createCostHeatmap(width, height, costs)
-
-            val sessionDir = DiagnosticsManager.currentSessionDir(ctx) ?: File(ctx.filesDir, "diag/index-temp").apply {
-                mkdirs()
-            }
-            val indexDir = File(sessionDir, "index").apply { mkdirs() }
-            val indexFile = File(indexDir, "index.bin")
-            val previewFile = File(indexDir, "index_preview_k$k.png")
-            val legendFile = File(indexDir, "palette_legend.csv")
-            val metaFile = File(indexDir, "index_meta.json")
-            val heatmapFile = File(indexDir, "cost_heatmap.png")
-
-            S7IndexIo.writeIndexBin(indexFile, width, height, k, indexBpp, indexData)
-            S7IndexIo.writeIndexPreviewPng(previewFile, previewBitmap)
-            S7IndexIo.writeLegendCsv(legendFile, paletteK)
-
-            val costHeatmapPath = if (costHeatmapBitmap != null) {
-                S7IndexIo.writeCostHeatmapPng(heatmapFile, costHeatmapBitmap)
-                heatmapFile.absolutePath
-            } else {
-                null
-            }
-
-            val ditherEnd = SystemClock.elapsedRealtime()
-            ditherMs = ditherEnd - ditherStart
-            val gcAfterDither = captureGc()
-            logGc("dither", gcBeforeDither, gcAfterDither)
-
-            val totalEnd = SystemClock.elapsedRealtime()
-            val totalMs = totalEnd - totalStart
-
-            val params = LinkedHashMap<String, Any?>(startParams)
-            params["workspace"] = workspaceMetrics
-            params["workspace_duration_ms"] = baselineDurationMs
-            params["timings_ms"] = linkedMapOf(
-                "prepare" to prepareMs,
-                "assign" to assignMs,
-                "dither" to ditherMs,
-                "total" to totalMs
-            )
-            params["dist_evals_total"] = distEvalsTotal
-            params["owner_changes"] = ownerChanges
-            params["tiles_updated"] = tilesUpdated
-            val foreignFraction = if (total > 0) foreignHits.toDouble() / total.toDouble() else 0.0
-            if (foreignFraction >= S7IndexSpec.FOREIGN_ZONE_NOTE_FRACTION) {
-                params["note"] = "high_fz_hits"
-            }
-            val stats = S7IndexStats(
-                kStar = k,
-                countsPerColor = counts.copyOf(),
-                foreignZoneHits = foreignHits,
-                edgeBreakPenaltySum = sumEb,
-                cohBonusSum = sumCoh,
-                meanCost = meanCost,
-                timeMs = totalMs,
-                prepareMs = prepareMs,
-                assignMs = assignMs,
-                ditherMs = ditherMs,
-                totalMs = totalMs,
-                distEvalsTotal = distEvalsTotal,
-                ownerChanges = ownerChanges,
-                tilesUpdated = tilesUpdated,
-                params = params
-            )
-            S7IndexIo.writeIndexMetaJson(metaFile, stats)
-
-            previewBitmap.recycle()
-            costHeatmapBitmap?.recycle()
-
-            Logger.i(
-                "PALETTE",
-                "index.done",
-                linkedMapOf(
-                    "width" to width,
-                    "height" to height,
+                val startParams = linkedMapOf(
+                    "algo" to S7IndexSpec.ALGO_VERSION,
                     "Kstar" to k,
-                    "path_index" to indexFile.absolutePath,
-                    "path_preview" to previewFile.absolutePath,
-                    "path_heatmap" to costHeatmapPath,
-                    "time_ms" to stats.totalMs,
-                    "prepare_ms" to stats.prepareMs,
-                    "assign_ms" to stats.assignMs,
-                    "dither_ms" to stats.ditherMs,
-                    "dist_evals_total" to stats.distEvalsTotal,
-                    "owner_changes" to stats.ownerChanges,
-                    "tiles_updated" to stats.tilesUpdated
+                    "alpha0" to S7IndexSpec.ALPHA0,
+                    "beta_fz" to S7IndexSpec.BETA_FZ,
+                    "beta_edge" to S7IndexSpec.BETA_EDGE,
+                    "beta_skin" to S7IndexSpec.BETA_SKIN,
+                    "beta_coh" to S7IndexSpec.BETA_COH,
+                    "tau_h_deg" to S7IndexSpec.TAU_H_DEG,
+                    "tile_w" to tileSpec.width,
+                    "tile_h" to tileSpec.height,
+                    "tile_overlap" to S7IndexSpec.TILE_OVERLAP,
+                    "tiles" to scheduler.tileCount,
+                    "workers" to workerCount,
+                    "seed" to seed,
+                    "device_tier" to deviceTier,
+                    "index_bpp" to indexBpp,
+                    "diag_gates" to gateConfig.toParamMap()
                 )
-            )
+                Logger.i("PALETTE", "index.start", startParams)
 
-            Log.i("AiX/PALETTE", "Index built: K*=${paletteK.size}, index_bpp=$indexBpp")
+                var sumCost = 0.0
+                var sumEb = 0.0
+                var sumCoh = 0.0
+                var foreignHits = 0
+                var distEvalsTotal = 0L
+                var ownerChanges = 0L
+                var tilesUpdated = 0
+                var prepareMs = 0L
+                var assignMs = 0L
+                var ditherMs = 0L
 
-                S7IndexResult(
+                val zoneEntries = S7SamplingSpec.Zone.entries.toTypedArray()
+                val tileAggregates = Array(scheduler.tileCount) { TileAggregate() }
+
+                val meanCost = try {
+                    val assignStart = SystemClock.elapsedRealtime()
+                    prepareMs = assignStart - totalStart
+                    val gcBeforeAssign = captureGc()
+                    val metrics = if (FeatureFlags.S7_PARALLEL_TILES_ENABLED) {
+                        assignUsingTiles(
+                            scheduler = scheduler,
+                            tileAggregates = tileAggregates,
+                            width = width,
+                            height = height,
+                            total = total,
+                            k = k,
+                            zoneEntries = zoneEntries,
+                            zones = zones,
+                            lPlane = lPlane,
+                            aPlane = aPlane,
+                            bPlane = bPlane,
+                            huePlane = huePlane,
+                            edgeMask = edgeMask,
+                            paletteLab = paletteLab,
+                            paletteHues = paletteHues,
+                            paletteRoles = paletteRoles,
+                            paletteColors = paletteColors,
+                            assigned = assigned,
+                            counts = counts,
+                            costs = costs,
+                            previewPixels = previewPixels,
+                            indexData = indexData,
+                            indexBpp = indexBpp
+                        )
+                    } else {
+                        assignSequential(
+                            width = width,
+                            height = height,
+                            total = total,
+                            k = k,
+                            zoneEntries = zoneEntries,
+                            zones = zones,
+                            lPlane = lPlane,
+                            aPlane = aPlane,
+                            bPlane = bPlane,
+                            huePlane = huePlane,
+                            edgeMask = edgeMask,
+                            paletteLab = paletteLab,
+                            paletteHues = paletteHues,
+                            paletteRoles = paletteRoles,
+                            paletteColors = paletteColors,
+                            assigned = assigned,
+                            counts = counts,
+                            costs = costs,
+                            previewPixels = previewPixels,
+                            indexData = indexData,
+                            indexBpp = indexBpp
+                        )
+                    }
+                    sumCost = metrics.sumCost
+                    sumEb = metrics.sumEb
+                    sumCoh = metrics.sumCoh
+                    foreignHits = metrics.foreignHits
+                    distEvalsTotal = metrics.distEvals
+                    ownerChanges = metrics.ownerChanges
+                    tilesUpdated = metrics.tilesUpdated
+                    val assignEnd = SystemClock.elapsedRealtime()
+                    assignMs = assignEnd - assignStart
+                    val gcAfterAssign = captureGc()
+                    logGc("assign", gcBeforeAssign, gcAfterAssign)
+                    if (progressNotified < 70) {
+                        progressListener?.invoke(70)
+                        progressNotified = 70
+                    }
+                    metrics.meanCost
+                } catch (t: Throwable) {
+                    Logger.e(
+                        "PALETTE",
+                        "index.fail",
+                        mapOf("stage" to "assign", "error" to (t.message ?: t.toString())),
+                        err = t
+                    )
+                    throw t
+                }
+
+                val baselineDurationMs = (System.nanoTime() - baselineStartNs) / 1_000_000
+                val baselineEndLog: MutableMap<String, Any> =
+                    workspaceMetrics.mapValues { it.value as Any }.toMutableMap().apply {
+                        put("phase", "end")
+                        put("duration_ms", baselineDurationMs)
+                    }
+                Logger.i("PALETTE", "s7.baseline", baselineEndLog)
+
+                val topCounts = counts.withIndex()
+                    .sortedByDescending { it.value }
+                    .take(S7IndexSpec.COUNTS_TOP_N)
+                    .map { mapOf("index" to it.index, "count" to it.value) }
+
+                Logger.i(
+                    "PALETTE",
+                    "index.assign",
+                    linkedMapOf(
+                        "index_bpp" to indexBpp,
+                        "counts_per_color_topN" to topCounts,
+                        "foreign_zone_hits" to foreignHits,
+                        "edge_break_penalty_sum" to sumEb,
+                        "coh_bonus_sum" to sumCoh,
+                        "mean_cost" to meanCost,
+                        "prepare_ms" to prepareMs,
+                        "assign_ms" to assignMs,
+                        "dist_evals_total" to distEvalsTotal,
+                        "owner_changes" to ownerChanges,
+                        "tiles_updated" to tilesUpdated
+                    )
+                )
+
+                S7ThreadGuard.assertBackground("s7.index.dither")
+                val ditherStart = SystemClock.elapsedRealtime()
+                val gcBeforeDither = captureGc()
+                val previewBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                previewBitmap.setPixels(previewPixels, 0, width, 0, 0, width, height)
+                val costHeatmapBitmap = createCostHeatmap(width, height, costs)
+
+                val sessionDir = DiagnosticsManager.currentSessionDir(ctx) ?: File(ctx.filesDir, "diag/index-temp").apply {
+                    mkdirs()
+                }
+                val indexDir = File(sessionDir, "index").apply { mkdirs() }
+                val indexFile = File(indexDir, "index.bin")
+                val previewFile = File(indexDir, "index_preview_k$k.png")
+                val legendFile = File(indexDir, "palette_legend.csv")
+                val metaFile = File(indexDir, "index_meta.json")
+                val heatmapFile = File(indexDir, "cost_heatmap.png")
+
+                S7IndexIo.writeIndexBin(indexFile, width, height, k, indexBpp, indexData)
+                S7IndexIo.writeIndexPreviewPng(previewFile, previewBitmap)
+                S7IndexIo.writeLegendCsv(legendFile, paletteK)
+
+                val costHeatmapPath = if (costHeatmapBitmap != null) {
+                    S7IndexIo.writeCostHeatmapPng(heatmapFile, costHeatmapBitmap)
+                    heatmapFile.absolutePath
+                } else {
+                    null
+                }
+
+                val ditherEnd = SystemClock.elapsedRealtime()
+                ditherMs = ditherEnd - ditherStart
+                val gcAfterDither = captureGc()
+                logGc("dither", gcBeforeDither, gcAfterDither)
+
+                val totalEnd = SystemClock.elapsedRealtime()
+                val totalMs = totalEnd - totalStart
+                if (progressNotified < 95) {
+                    progressListener?.invoke(95)
+                    progressNotified = 95
+                }
+
+                val params = LinkedHashMap<String, Any?>(startParams)
+                params["workspace"] = workspaceMetrics
+                params["workspace_duration_ms"] = baselineDurationMs
+                params["timings_ms"] = linkedMapOf(
+                    "prepare" to prepareMs,
+                    "assign" to assignMs,
+                    "dither" to ditherMs,
+                    "total" to totalMs
+                )
+                params["dist_evals_total"] = distEvalsTotal
+                params["owner_changes"] = ownerChanges
+                params["tiles_updated"] = tilesUpdated
+                val foreignFraction = if (total > 0) foreignHits.toDouble() / total.toDouble() else 0.0
+                if (foreignFraction >= S7IndexSpec.FOREIGN_ZONE_NOTE_FRACTION) {
+                    params["note"] = "high_fz_hits"
+                }
+                val stats = S7IndexStats(
+                    kStar = k,
+                    countsPerColor = counts.copyOf(),
+                    foreignZoneHits = foreignHits,
+                    edgeBreakPenaltySum = sumEb,
+                    cohBonusSum = sumCoh,
+                    meanCost = meanCost,
+                    timeMs = totalMs,
+                    prepareMs = prepareMs,
+                    assignMs = assignMs,
+                    ditherMs = ditherMs,
+                    totalMs = totalMs,
+                    distEvalsTotal = distEvalsTotal,
+                    ownerChanges = ownerChanges,
+                    tilesUpdated = tilesUpdated,
+                    params = params
+                )
+                S7IndexIo.writeIndexMetaJson(metaFile, stats)
+
+                previewBitmap.recycle()
+                costHeatmapBitmap?.recycle()
+
+                Logger.i(
+                    "PALETTE",
+                    "index.done",
+                    linkedMapOf(
+                        "width" to width,
+                        "height" to height,
+                        "Kstar" to k,
+                        "path_index" to indexFile.absolutePath,
+                        "path_preview" to previewFile.absolutePath,
+                        "path_heatmap" to costHeatmapPath,
+                        "time_ms" to stats.totalMs,
+                        "prepare_ms" to stats.prepareMs,
+                        "assign_ms" to stats.assignMs,
+                        "dither_ms" to stats.ditherMs,
+                        "dist_evals_total" to stats.distEvalsTotal,
+                        "owner_changes" to stats.ownerChanges,
+                        "tiles_updated" to stats.tilesUpdated
+                    )
+                )
+
+                Log.i("AiX/PALETTE", "Index built: K*=${paletteK.size}, index_bpp=$indexBpp")
+
+                val result = S7IndexResult(
                     width = width,
                     height = height,
                     kStar = k,
@@ -538,7 +552,13 @@ object S7Indexer {
                     costHeatmapPath = costHeatmapPath,
                     gateConfig = gateConfig
                 )
+                if (progressNotified < 100) {
+                    progressListener?.invoke(100)
+                    progressNotified = 100
+                }
+                result
             } finally {
+                progressListener?.invoke(100)
                 LosProfiler.snapshotAndReset()
             }
         }

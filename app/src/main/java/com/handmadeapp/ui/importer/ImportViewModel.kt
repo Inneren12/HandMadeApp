@@ -16,7 +16,7 @@ import com.handmadeapp.analysis.Masks
 import com.handmadeapp.analysis.Stage3Analyze
 import com.handmadeapp.logging.Logger
 import com.handmadeapp.prescale.PreScaleRunner
-import com.handmadeapp.runtime.FeatureFlags
+import com.appforcross.editor.config.FeatureFlags
 import com.handmadeapp.runtime.S7Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job

@@ -108,6 +108,7 @@ import android.os.Looper
 import com.handmadeapp.runtime.S7Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import com.handmadeapp.watchdog.MainThreadWatchdog
+import com.handmadeapp.analysis.Stage3Analyze
 /**
  * ImportActivity: выбор изображения, предпросмотр и «живые» правки (яркость/контраст/насыщенность).
  * Реализовано без зависимостей на Activity Result API (для совместимости) — используем onActivityResult.

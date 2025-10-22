@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Size
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -20,6 +21,7 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
@@ -57,6 +59,16 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
+
+    private val _indexProgress = MutableSharedFlow<Int>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val indexProgress = _indexProgress.asSharedFlow()
+
+    private var lastProgressValue = -1
+    private var lastProgressAt = 0L
 
     private var cachedMasks: Masks? = null
     private var cachedMaskSize: Size? = null
@@ -142,9 +154,12 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun runIndexRequest(request: IndexRequest) {
         _uiState.update { it.copy(isIndexRunning = true, indexError = null) }
+        resetProgressThrottle()
+        emitProgress(0)
         var preBitmap: Bitmap? = null
         var previewBitmap: Bitmap? = null
         var costBitmap: Bitmap? = null
+        var progressCompleted = false
         try {
             preBitmap = BitmapFactory.decodeFile(request.preScale.pngPath)
             if (preBitmap == null) {
@@ -164,6 +179,7 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
                 paletteK = palette,
                 seed = request.seed,
                 deviceTier = request.tier,
+                progressListener = ::emitProgress,
             )
             previewBitmap = BitmapFactory.decodeFile(result.previewPath)
                 ?: throw IllegalStateException("Не удалось открыть индекс-превью")
@@ -171,6 +187,7 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
             publishIndexSuccess(result, previewBitmap, costBitmap)
             previewBitmap = null
             costBitmap = null
+            progressCompleted = true
         } catch (cancelled: CancellationException) {
             _uiState.update { it.copy(isIndexRunning = false) }
             throw cancelled
@@ -181,8 +198,13 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
                 mapOf("stage" to "viewmodel", "error" to (t.message ?: t.toString())),
                 err = t,
             )
+            emitProgress(100)
+            progressCompleted = true
             _uiState.update { it.copy(isIndexRunning = false, indexError = t.message, indexResult = null) }
         } finally {
+            if (!progressCompleted) {
+                emitProgress(100)
+            }
             preBitmap?.recycle()
             previewBitmap?.recycle()
             costBitmap?.recycle()
@@ -249,5 +271,28 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
             skin = Bitmap.createScaledBitmap(masks.skin, targetW, targetH, filter),
             sky = Bitmap.createScaledBitmap(masks.sky, targetW, targetH, filter),
         )
+    }
+
+    private fun emitProgress(percent: Int) {
+        val clamped = percent.coerceIn(0, 100)
+        val now = SystemClock.elapsedRealtime()
+        val delta = if (lastProgressValue < 0) Int.MAX_VALUE else clamped - lastProgressValue
+        val elapsed = now - lastProgressAt
+        val shouldEmit = lastProgressValue < 0 || clamped == 0 || clamped == 100 ||
+            delta >= MIN_PROGRESS_STEP || elapsed >= MIN_PROGRESS_INTERVAL_MS
+        if (!shouldEmit) return
+        lastProgressValue = clamped
+        lastProgressAt = now
+        _indexProgress.tryEmit(clamped)
+    }
+
+    private fun resetProgressThrottle() {
+        lastProgressValue = -1
+        lastProgressAt = 0L
+    }
+
+    private companion object {
+        private const val MIN_PROGRESS_STEP = 2
+        private const val MIN_PROGRESS_INTERVAL_MS = 100L
     }
 }

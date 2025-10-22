@@ -133,7 +133,6 @@ class ImportActivity : AppCompatActivity() {
     private val s7Scope = CoroutineScope(SupervisorJob() + S7Dispatchers.preview)
     private var s7Job: Job? = null
     private var s7JobName: String? = null
-    private val progressVisibilityThrottler = ThrottledUiUpdater(activityScope, UI_THROTTLE_MS)
     private val palettePreviewThrottler = ThrottledUiUpdater(activityScope, UI_THROTTLE_MS)
     // Поток прогресса (чтобы не дёргать UI на каждый тик)
     private val progressSignals = MutableSharedFlow<ProgressSignal>(
@@ -141,7 +140,6 @@ class ImportActivity : AppCompatActivity() {
         extraBufferCapacity = 16,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
-    private var desiredProgressVisible = false
     private var pendingPaletteColors: List<S7InitColor>? = null
     private val s7TriggerDesiredState = mutableMapOf<View, Boolean>()
     private var s7JobActive = false
@@ -230,6 +228,8 @@ class ImportActivity : AppCompatActivity() {
         sbContrast = findViewById(R.id.sbContrast)
         sbSaturation = findViewById(R.id.sbSaturation)
         progress = findViewById(R.id.progress)
+        progress.max = 100
+        progress.isIndeterminate = true
         fileNameView = findViewById(R.id.tvFileName)
         btnProcess = findViewById(R.id.btnProcess)
         btnLogPalette = findViewById(R.id.btnLogPalette)
@@ -261,6 +261,7 @@ class ImportActivity : AppCompatActivity() {
         paletteStrip = findViewById(R.id.paletteStrip)
 
         observeProgressSignals()
+        observeIndexProgress()
         setProgressVisible(false, "init")
 
         FeatureFlags.logFlagsOnce()
@@ -649,12 +650,8 @@ class ImportActivity : AppCompatActivity() {
     }
 
     private fun setProgressVisible(visible: Boolean) {
-        desiredProgressVisible = visible
-        progressVisibilityThrottler.submit {
-            if (this@ImportActivity::progress.isInitialized) {
-                progress.isVisible = desiredProgressVisible
-            }
-        }
+        val reason = if (visible) "manual.show" else "manual.hide"
+        setProgressVisible(visible, reason)
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -2341,31 +2338,56 @@ class ImportActivity : AppCompatActivity() {
 
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     private fun observeProgressSignals() {
-        activityScope.launch {
-            var lastDispatchAt = 0L
-            progressSignals
-                .sample(50.milliseconds)
-                .distinctUntilChanged { old, new -> old.visible == new.visible }
-                .collect { signal ->
-                    val now = SystemClock.elapsedRealtime()
-                    val lag = (now - signal.emittedAt).coerceAtLeast(0L)
-                    val sincePrev = if (lastDispatchAt == 0L) null else now - lastDispatchAt
-                    progress.isVisible = signal.visible
-                    lastDispatchAt = now
-                    val data = mutableMapOf<String, Any?>(
-                        "visible" to signal.visible,
-                        "reason" to signal.reason,
-                        "lagMs" to lag
-                    )
-                    sincePrev?.let { data["sincePrevMs"] = it }
-                    Logger.throttle(
-                        cat = "UI",
-                        msg = "progress.flow.dispatch",
-                        intervalMs = sincePrev ?: lag,
-                        data = data
-                    )
-                }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                var lastDispatchAt = 0L
+                progressSignals
+                    .sample(150.milliseconds)
+                    .distinctUntilChanged { old, new -> old.visible == new.visible }
+                    .collect { signal ->
+                        if (!this@ImportActivity::progress.isInitialized) return@collect
+                        val now = SystemClock.elapsedRealtime()
+                        val lag = (now - signal.emittedAt).coerceAtLeast(0L)
+                        val sincePrev = if (lastDispatchAt == 0L) null else now - lastDispatchAt
+                        progress.isVisible = signal.visible
+                        lastDispatchAt = now
+                        if (isStageBoundary(signal.reason)) {
+                            val data = mutableMapOf<String, Any?>(
+                                "stage" to signal.reason,
+                                "visible" to signal.visible,
+                                "lag_ms" to lag
+                            )
+                            sincePrev?.let { data["since_prev_ms"] = it }
+                            Logger.i("UI", "progress.stage", data)
+                        }
+                    }
+            }
         }
+    }
+
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private fun observeIndexProgress() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.indexProgress
+                    .sample(150.milliseconds)
+                    .collect { value ->
+                        if (!this@ImportActivity::progress.isInitialized) return@collect
+                        val clamped = value.coerceIn(0, 100)
+                        progress.isIndeterminate = clamped == 0 || clamped == 100
+                        progress.progress = clamped
+                    }
+            }
+        }
+    }
+
+    private fun isStageBoundary(reason: String): Boolean {
+        if (!reason.startsWith("s7.")) return false
+        return reason.endsWith(".start") ||
+            reason.endsWith(".done") ||
+            reason.endsWith(".fail") ||
+            reason.endsWith(".finish") ||
+            reason.endsWith("_ms")
     }
 
     private fun setProgressVisible(visible: Boolean, reason: String) {
